@@ -13,6 +13,8 @@
 #include <queue>
 #include <deque>
 #include <map>
+#include <unordered_map>
+#include <unordered_set>
 #include <set>
 #include <algorithm>
 #include <boost/archive/text_oarchive.hpp>
@@ -24,7 +26,7 @@
 #include <boost/serialization/utility.hpp>
 #include <boost/serialization/base_object.hpp>
 #include <sstream>
-
+#include <initializer_list>
 #include <boost/archive/xml_iarchive.hpp>
 #include <boost/archive/xml_oarchive.hpp>
 
@@ -143,16 +145,6 @@ extern bool ALLOW_DEFERRING_TRANSFERS;
  */
 extern const uint FTL_IMPLEMENTATION;
 
-/*
- * Number of blocks allowed to be in DFTL Cached Mapping Table.
- */
-extern const uint CACHE_DFTL_LIMIT;
-
-/*
- * Parallelism mode
- */
-extern const uint PARALLELISM_MODE;
-
 /* Virtual block size (as a multiple of the physical block size) */
 //extern const uint VIRTUAL_BLOCK_SIZE;
 
@@ -178,22 +170,24 @@ extern void *global_buffer;
  * Controls the block manager to be used
  */
 extern int BLOCK_MANAGER_ID;
+extern int GARBAGE_COLLECTION_POLICY;
 extern int GREED_SCALE;
-extern int WEARWOLF_LOCALITY_THRESHOLD;
+extern int SEQUENTIAL_LOCALITY_THRESHOLD;
 extern bool ENABLE_TAGGING;
 extern int WRITE_DEADLINE;
 extern int READ_DEADLINE;
 extern int READ_TRANSFER_DEADLINE;
+
+extern int FTL_DESIGN;
+extern bool IS_FTL_PAGE_MAPPING;
+
+extern int SRAM;
 
 /*
  * Controls the level of detail of output
  */
 extern int PRINT_LEVEL;
 extern bool PRINT_FILE_MANAGER_INFO;
-/*
- * tells the Operating System class to either lock or not lock LBAs after dispatching IOs to them
- */
-extern const bool OS_LOCK;
 
 /* Defines the max number of copy back operations on a page before ECC check is performed.
  * Set to zero to disable copy back GC operations */
@@ -244,7 +238,7 @@ enum block_state{FREE, PARTIALLY_FREE, ACTIVE, INACTIVE};
  * 	                                page states set to empty)
  * 	merge - move valid pages from block at address (page state set to invalid)
  * 	           to free pages in block at merge_address */
-enum event_type{NOT_VALID, READ, READ_COMMAND, READ_TRANSFER, WRITE, ERASE, MERGE, TRIM, GARBAGE_COLLECTION, COPY_BACK};
+enum event_type{NOT_VALID, READ, READ_COMMAND, READ_TRANSFER, WRITE, ERASE, MERGE, TRIM, GARBAGE_COLLECTION, COPY_BACK, MESSAGE};
 
 /* General return status
  * return status for simulator operations that only need to provide general
@@ -257,19 +251,6 @@ enum status{FAILURE, SUCCESS};
  * 	the package, die, plane, and block fields are valid
  * 	the page field is not valid */
 enum address_valid{NONE, PACKAGE, DIE, PLANE, BLOCK, PAGE};
-
-/*
- * Block type status
- * used for the garbage collector specify what pool
- * it should work with.
- * the block types are log, data and map (Directory map usually)
- */
-enum block_type {LOG, DATA, LOG_SEQ};
-
-/*
- * Enumeration of the different FTL implementations.
- */
-enum ftl_implementation {IMPL_PAGE, IMPL_BAST, IMPL_FAST, IMPL_DFTL, IMPL_BIMODAL};
 
 /*
  * Enumeration of page access patterns
@@ -301,13 +282,8 @@ class Package;
 
 class FtlParent;
 class FtlImpl_Page;
-class FtlImpl_Bast;
-class FtlImpl_Fast;
-//class FtlImpl_DftlParent;
-//class FtlImpl_Dftl;
-class FtlImpl_BDftl;
-
-class Ram;
+class DFTL;
+class FAST;
 class Ssd;
 
 class event_queue;
@@ -321,6 +297,7 @@ class Wearwolf;
 class Sequential_Locality_BM;
 class Wear_Leveling_Strategy;
 class Garbage_Collector;
+class flash_resident_ftl_garbage_collection;
 class Migrator;
 
 class Sequential_Pattern_Detector;
@@ -335,6 +312,7 @@ struct Address_Range;
 class Flexible_Reader;
 
 class MTRand_int32;
+
 
 /* Class to manage physical addresses for the SSD.  It was designed to have
  * public members like a struct for quick access but also have checking,
@@ -373,6 +351,11 @@ public:
 		valid = rhs.valid;
 		return *this;
 	}
+
+	bool operator<(const Address &rhs) const {
+		return this->get_linear_address() < rhs.get_linear_address();
+	}
+
     friend class boost::serialization::access;
     template<class Archive>
     void serialize(Archive & ar, const unsigned int version)
@@ -413,13 +396,14 @@ class Event
 public:
 	Event(enum event_type type, ulong logical_address, uint size, double start_time);
 	Event();
-	Event(Event& event);
+	Event(Event const& event);
 	inline virtual ~Event() {}
 	inline ulong get_logical_address() const 			{ return logical_address; }
 	inline void set_logical_address(ulong addr) 		{ logical_address = addr; }
 	inline const Address &get_address() const 			{ return address; }
 	inline const Address &get_replace_address() const 	{ return replace_address; }
 	inline uint get_size() const 						{ return size; }
+	inline void set_size(int new_size)  				{ size = new_size; }
 	inline enum event_type get_event_type() const 		{ return type; }
 	inline double get_start_time() const 				{ assert(start_time >= 0.0); return start_time; }
 	inline bool is_original_application_io() const 		{ return original_application_io; }
@@ -472,8 +456,10 @@ public:
 	bool is_flexible_read();
 	inline void increment_iteration_count() { num_iterations_in_scheduler++; }
 	inline int get_iteration_count() { return num_iterations_in_scheduler; }
+	inline int get_ssd_id() { return ssd_id; }
+	inline void set_ssd_id(int new_ssd_id) { ssd_id = new_ssd_id; }
 protected:
-	double start_time;
+	long double start_time;
 	double execution_time;
 	double bus_wait_time;
 	double os_wait_time;
@@ -502,6 +488,8 @@ protected:
 	uint application_io_id;
 	static uint application_io_id_generator;
 
+	uint ssd_id;
+
 	int age_class;
 	int tag;
 
@@ -510,12 +498,19 @@ protected:
 	int num_iterations_in_scheduler;
 };
 
+class Message : public Event {
+public:
+	Message(double time) : Event(MESSAGE, 0, 1, time) {}
+};
+
+
+
 /* The page is the lowest level data storage unit that is the size unit of
  * requests (events).  Pages maintain their state as events modify them. */
 class Page 
 {
 public:
-	inline Page() : state(EMPTY) {}
+	inline Page() : state(EMPTY), logical_addr(-1) {}
 	inline ~Page() {}
 	enum status _read(Event &event);
 	enum status _write(Event &event);
@@ -527,8 +522,11 @@ public:
     {
         ar & state;
     }
+    void set_logical_addr(int l) { logical_addr = l;}
+    int get_logical_addr() const { return logical_addr; }
 private:
 	enum page_state state;
+	int logical_addr;
 };
 
 /* The block is the data storage hardware unit where erases are implemented.
@@ -546,7 +544,7 @@ public:
 	inline uint get_pages_invalid() const { return pages_invalid; }
 	inline enum block_state get_state() const {
 		return 	pages_invalid == BLOCK_SIZE ? INACTIVE :
-				pages_valid == BLOCK_SIZE ? FREE :
+				pages_valid == BLOCK_SIZE ? ACTIVE :
 				pages_invalid + pages_valid == BLOCK_SIZE ? ACTIVE : PARTIALLY_FREE;
 	}
 	inline ulong get_erases_remaining() const { return erases_remaining; }
@@ -817,10 +815,10 @@ private:
 class FtlParent
 {
 public:
-	FtlParent(Ssd *ssd) : ssd(ssd), scheduler(NULL) {};
-	FtlParent() : ssd(NULL), scheduler(NULL) {};
-	inline void set_scheduler(IOScheduler* sched) { scheduler = sched; }
-	virtual ~FtlParent () {};
+	FtlParent(Ssd *ssd, Block_manager_parent* bm);
+	FtlParent() : ssd(NULL), scheduler(NULL), bm(NULL), normal_stats("normal_stats", 50000) {};
+	virtual void set_scheduler(IOScheduler* sched) { scheduler = sched; }
+	virtual ~FtlParent ();
 	virtual void read(Event *event) = 0;
 	virtual void write(Event *event) = 0;
 	virtual void trim(Event *event) = 0;
@@ -830,23 +828,55 @@ public:
 	virtual long get_logical_address(uint physical_address) const = 0;
 	virtual Address get_physical_address(uint logical_address) const = 0;
 	virtual void set_replace_address(Event& event) const = 0;
-	virtual void set_read_address(Event& event) = 0;
+	virtual void set_read_address(Event& event) const = 0;
+	virtual void register_erase_completion(Event & event) {};
+	virtual void print() const {};
+
+	void set_block_manager(Block_manager_parent* b) { bm = b; }
+	Block_manager_parent* get_block_manager() { return bm; }
     friend class boost::serialization::access;
     template<class Archive>
     void serialize(Archive & ar, const unsigned int version)
     {
     	ar & ssd;
     	ar & scheduler;
+    	ar & bm;
     }
 protected:
 	Ssd *ssd;
 	IOScheduler *scheduler;
+	Block_manager_parent* bm;
+	void collect_stats(Event const& event);
+	struct stats {
+		stats(string name, long counter_limit);
+		string file_name;
+		long num_noop_reads_per_interval;
+		long num_noop_writes_per_interval;
+		long num_mapping_writes;
+		long num_mapping_reads;
+		long mapping_reads_per_interval;
+		long mapping_writes_per_interval;
+		long gc_reads_per_interval;
+		long gc_writes_per_interval;
+		long gc_mapping_writes_per_interval;
+		long gc_mapping_reads_per_interval;
+		long app_reads_per_interval;
+		long app_writes_per_interval;
+		long num_noop_reads;
+		long num_noop_writes;
+
+		long counter;
+		const long COUNTER_LIMIT;
+		void print() const;
+		void collect_stats(Event const& event);
+	};
+	stats normal_stats;
 };
 
 class FtlImpl_Page : public FtlParent
 {
 public:
-	FtlImpl_Page(Ssd *ssd);
+	FtlImpl_Page(Ssd *ssd, Block_manager_parent* bm);
 	FtlImpl_Page();
 	~FtlImpl_Page();
 	void read(Event *event);
@@ -858,7 +888,7 @@ public:
 	long get_logical_address(uint physical_address) const;
 	Address get_physical_address(uint logical_address) const;
 	void set_replace_address(Event& event) const;
-	void set_read_address(Event& event);
+	void set_read_address(Event& event) const;
     friend class boost::serialization::access;
     template<class Archive>
     void serialize(Archive & ar, const unsigned int version)
@@ -867,133 +897,176 @@ public:
     	ar & logical_to_physical_map;
     	ar & physical_to_logical_map;
     }
-
 private:
-	Address get_physical_address(Event const& event) const;
 	vector<long> logical_to_physical_map;
 	vector<long> physical_to_logical_map;
 };
 
-/*class FtlImpl_DftlParent : public FtlParent
-{
+
+
+class ftl_cache {
 public:
-	FtlImpl_DftlParent(Ssd &ssd);
-	~FtlImpl_DftlParent();
-	virtual void read(Event *event) = 0;
-	virtual void write(Event *event) = 0;
-	virtual void trim(Event *event) = 0;
-protected:
-	struct MPage {
-		long vpn;
-		long ppn;
-		double create_ts;		//when its added to the CTM
-		double modified_ts;		//when its modified within the CTM
-		bool cached;
-		MPage(long vpn);
-		bool has_been_modified();
+	void register_write_arrival(Event const&  app_write);
+	bool register_read_arrival(Event* app_read);
+	void register_write_completion(Event const& app_write);
+	void handle_read_dependency(Event* event);
+	void clear_clean_entries(double time);
+	int choose_dirty_victim(double time);
+	int get_num_dirty_entries() const;
+	bool mark_clean(int key, double time);
+	int erase_victim(double time, bool allow_flushing_dirty);
+	bool contains(int key) const;
+	void set_synchronized(int key);
+	static int CACHED_ENTRIES_THRESHOLD;
+
+	struct entry {
+		entry() : dirty(false), synch_flag(false), fixed(false), hotness(0), timestamp(numeric_limits<double>::infinity()) {}
+		bool dirty;
+		bool synch_flag;
+		int fixed;
+		short hotness;
+		double timestamp; // when was the entry added to the cache
 	};
-
-	long int cmt;
-
-	static double mpage_modified_ts_compare(const MPage& mpage);
-
-	typedef boost::multi_index_container<
-		FtlImpl_DftlParent::MPage,
-			boost::multi_index::indexed_by<
-		    // sort by MPage::operator<
-    			boost::multi_index::random_access<>,
-
-    			// Sort by modified ts
-    			boost::multi_index::ordered_non_unique<boost::multi_index::global_fun<const FtlImpl_DftlParent::MPage&,double,&FtlImpl_DftlParent::mpage_modified_ts_compare> >
-		  >
-		> trans_set;
-
-	typedef trans_set::nth_index<0>::type MpageByID;
-	typedef trans_set::nth_index<1>::type MpageByModified;
-	trans_set trans_map;
-	long *reverse_trans_map;
-
-	void consult_GTD(long dppn, Event *event);
-	void reset_MPage(FtlImpl_DftlParent::MPage &mpage);
-	void resolve_mapping(Event *event, bool isWrite);
-	void update_translation_map(FtlImpl_DftlParent::MPage &mpage, long ppn);
-	bool lookup_CMT(long dlpn, Event *event);
-	void evict_page_from_cache(double time);
-	long get_logical_address(uint physical_address) const;
-	long get_mapping_virtual_address(long event_lba);
-	void update_mapping_on_flash(long lba, double time);
-	void remove_from_cache(long lba);
-
-	// Mapping information
-	const int addressSize;
-	const int addressPerPage;
-	const int num_mapping_pages;
-	const uint totalCMTentries;
-
-	deque<Event*> current_dependent_events;
-	map<long, long> global_translation_directory; // a map from virtual translation pages to physical translation pages
-	map<long, vector<long> > ongoing_mapping_reads; // maps the address of ongoing mapping reads to LBAs that need to be inserted into the cache
-
-	long num_pages_written;
+	unordered_map<long, entry> cached_mapping_table; // maps logical addresses to physical addresses
+	queue<long> eviction_queue_dirty;
+	queue<long> eviction_queue_clean;
+private:
+	void iterate(long& victim_key, entry& victim_entry, bool allow_choosing_dirty);
 };
-*/
-/*class FtlImpl_Dftl : public FtlImpl_DftlParent
-{
+
+class flash_resident_page_ftl : public FtlParent {
 public:
-	FtlImpl_Dftl(Ssd &ssd);
-	~FtlImpl_Dftl();
+	flash_resident_page_ftl(Ssd *ssd, Block_manager_parent* bm) :
+		FtlParent(ssd, bm), cache(new ftl_cache()), page_mapping(new FtlImpl_Page(ssd, bm)), gc(NULL) {}
+	flash_resident_page_ftl() : FtlParent(), gc(NULL), cache(new ftl_cache()), page_mapping(NULL) {}
+	ftl_cache* get_cache() { return cache; }
+	void set_gc(flash_resident_ftl_garbage_collection* new_gc) { gc = new_gc; }
+	FtlImpl_Page* get_page_mapping() { return page_mapping; }
+	void update_bitmap(vector<bool>& bitmap, Address block_addr);
+	void set_synchronized(int logical_address);
+protected:
+	ftl_cache* cache;
+	FtlImpl_Page* page_mapping;
+	flash_resident_ftl_garbage_collection* gc;
+};
+
+
+class DFTL : public flash_resident_page_ftl {
+public:
+	DFTL(Ssd *ssd, Block_manager_parent* bm);
+	DFTL();
+	~DFTL();
 	void read(Event *event);
 	void write(Event *event);
 	void trim(Event *event);
 	void register_write_completion(Event const& event, enum status result);
 	void register_read_completion(Event const& event, enum status result);
 	void register_trim_completion(Event & event);
+	long get_logical_address(uint physical_address) const;
+	Address get_physical_address(uint logical_address) const;
 	void set_replace_address(Event& event) const;
-	void set_read_address(Event& event);
-private:
-	const double over_provisioning_percentage;
-};*/
+	void set_read_address(Event& event) const;
+	void print() const;
+	void print_short() const;
+	static int ENTRIES_PER_TRANSLATION_PAGE;
+	static bool SEPERATE_MAPPING_PAGES;
 
-/*class FtlImpl_BDftl : public FtlImpl_DftlParent
-{
+private:
+	void notify_garbage_collector(int translation_page_id, double time);
+	//bool flush_mapping(double time, bool allow_flushing_dirty);
+	//void iterate(long& victim_key, ftl_cache::entry& victim_entry, bool allow_choosing_dirty);
+	void create_mapping_read(long translation_page_id, double time, Event* dependant);
+	void mark_clean(long translation_page_id, Event const& event);
+	void try_clear_space_in_mapping_cache(double time);
+	set<long> ongoing_mapping_operations; // contains the logical addresses of ongoing mapping IOs
+	unordered_map<long, vector<Event*> > application_ios_waiting_for_translation; // maps translation page ids to application IOs awaiting translation
+	struct mapping_page {
+		map<int, Address> entries;
+	};
+	vector<mapping_page> mapping_pages;
+	struct dftl_statistics {
+		map<int, int> cleans_histogram;
+		map<int, int> address_hits;
+	};
+	dftl_statistics dftl_stats;
+};
+
+
+class FAST : public FtlParent {
 public:
-	FtlImpl_BDftl(Controller &controller);
-	~FtlImpl_BDftl();
-	enum status read(Event &event);
-	enum status write(Event &event);
-	enum status trim(Event &event);
-	void cleanup_block(Event &event, Block *block);
+	FAST(Ssd *ssd, Block_manager_parent* bm, Migrator* migrator);
+	FAST();
+	~FAST();
+	void read(Event *event);
+	void write(Event *event);
+	void trim(Event *event);
+	void register_write_completion(Event const& event, enum status result);
+	void register_read_completion(Event const& event, enum status result);
+	void register_trim_completion(Event & event);
+	long get_logical_address(uint physical_address) const;
+	Address get_physical_address(uint logical_address) const;
+	void set_replace_address(Event& event) const;
+	void set_read_address(Event& event) const;
+	void register_erase_completion(Event & event);
+	void print() const;
+    friend class boost::serialization::access;
+    template<class Archive> void
+    serialize(Archive & ar, const unsigned int version) {
+    	ar & boost::serialization::base_object<FtlParent>(*this);
+    	ar & translation_table;
+    	ar & active_log_blocks_map;
+    	ar & dial;
+    	ar & NUM_LOG_BLOCKS;
+    	ar & num_active_log_blocks;
+    	ar & bm;
+    	//ar & queued_events;
+    	ar & migrator;
+    	ar & page_mapping;
+    	//ar & gc_queue;
+    }
 private:
-	struct BPage {
-		uint pbn;
-		unsigned char nextPage;
-		bool optimal;
+	void schedule(Event* e);
+	void choose_existing_log_block(Event* e);
+	void unlock_block(Event const& event);
+	void consider_doing_garbage_collection(double time);
 
-		BPage();
+	struct log_block {
+		log_block(Address& addr) : addr(addr), num_blocks_mapped_inside() {}
+		log_block() : addr(), num_blocks_mapped_inside() {}
+		Address addr;
+		set<int> num_blocks_mapped_inside;
+	    friend class boost::serialization::access;
+	    template<class Archive> void
+	    serialize(Archive & ar, const unsigned int version) {
+	    	ar & addr;
+	    	ar & num_blocks_mapped_inside;
+	    }
 	};
 
-	BPage *block_map;
-	bool *trim_map;
+	struct mycomparison
+	{
+	  bool operator() (const log_block* lhs, const log_block* rhs) const
+	  {
+	    return lhs->num_blocks_mapped_inside.size() > rhs->num_blocks_mapped_inside.size();
+	  }
+	};
 
-	queue<Block*> blockQueue;
+	void write_in_log_block(Event* event);
+	void queue_up(Event* e, Address const& lock);
+	priority_queue<log_block*, std::vector<log_block*>, mycomparison> full_log_blocks;
+	void release_events_there_was_no_space_for();
+	void garbage_collect(int block_id, log_block* log_block, double time);
 
-	Block* inuseBlock;
-	bool block_next_new();
-	long get_free_biftl_page(Event &event);
-	void print_ftl_statistics();
-};
-*/
-
-/* This is a basic implementation that only provides delay updates to events
- * based on a delay value multiplied by the size (number of pages) needed to
- * be written. */
-class Ram 
-{
-public:
-	Ram();
-	~Ram();
-	enum status read(Event &event);
-	enum status write(Event &event);
+	vector<Address> translation_table;		  // maps block ID to a block address in flash. This is the main mapping table
+	map<int, log_block*> active_log_blocks_map;  // Maps a block ID to the address of the corresponding log block. Used to quickly determine where to place an update
+	int dial;
+	int NUM_LOG_BLOCKS;
+	int num_active_log_blocks;
+	map<int, queue<Event*> > queued_events; // stores events tar
+	Migrator* migrator;
+	FtlImpl_Page page_mapping;
+	map<int, queue<Event*> > gc_queue;
+	map<long, queue<Event*> > logical_dependencies;  // a locking table with page granularity
 };
 
 /* The SSD is the single main object that will be created to simulate a real
@@ -1005,11 +1078,8 @@ public:
 	Ssd ();
 	~Ssd();
 	void submit(Event* event);
-	void event_arrive(enum event_type type, ulong logical_address, uint size, double start_time);
-	void event_arrive(enum event_type type, ulong logical_address, uint size, double start_time, void *buffer);
 	void progress_since_os_is_waiting();
 	void register_event_completion(Event * event);
-	void *get_result_buffer();
 	inline Package* get_package(int i) { return &data[i]; }
 	void set_operating_system(OperatingSystem* os);
 	FtlParent* get_ftl() const;
@@ -1027,16 +1097,26 @@ public:
     IOScheduler* get_scheduler() { return scheduler; }
     void execute_all_remaining_events();
 private:
-	enum status read(Event &event);
-	enum status write(Event &event);
-	enum status erase(Event &event);
+    void submit_to_ftl(Event* event);
 	Package &get_data();
-	Ram ram;
 	vector<Package> data;
 	double last_io_submission_time;
 	OperatingSystem* os;
 	FtlParent *ftl;
 	IOScheduler *scheduler;
+
+	struct io_map {
+		void resiger_large_event(Event* e);
+		void register_completion(Event* e);
+		bool is_part_of_large_event(Event* e);
+		bool is_finished(int id) const;
+		Event* get_original_event(int id);
+	private:
+		map<int, int> io_counter;
+		map<int, Event*> event_map;
+	};
+	io_map large_events_map;
+
 };
 
 class RaidSsd
@@ -1071,13 +1151,14 @@ public:
 	static string get_as_string(ulong cursor, ulong max, int chars_per_line);
 	static void print_vertically();
 	static void write_file();
+	static bool write_to_file;
 private:
 	static void trim_from_start(int num_characters_from_start);
 	static void write(int package, int die, char symbol, int length);
 	static void write_with_id(int package, int die, char symbol, int length, vector<vector<char> > symbols);
 	static vector<vector<vector<char> > > trace;
 	static string file_name;
-	static bool write_to_file;
+
 	static long amount_written_to_file;
 };
 
@@ -1086,6 +1167,7 @@ class StateVisualiser
 public:
 	static void print_page_status();
 	static void print_block_ages();
+	static void print_page_valid_histogram();
 	static Ssd * ssd;
 	static void init(Ssd * ssd);
 };
@@ -1116,6 +1198,48 @@ private:
 	static const double age_histogram_bin_size;
 };
 
+class Number {
+public:
+	virtual string toString() = 0;
+	virtual double toDouble() = 0;
+	virtual int toInt() = 0;
+};
+class Integer : public Number {
+public:
+	Integer(int num) : value(num) {};
+	int value;
+	string toString() { return to_string(value); };
+	double toDouble() { return value; }
+	int toInt() { return value; }
+};
+class Double : public Number {
+public:
+	Double(double num) : value(num) {};
+	double value;
+	string toString() { return to_string(value); };
+	double toDouble() { return value; }
+	int toInt() { return value; }
+};
+
+class StatisticData {
+public:
+	~StatisticData();
+	static void init();
+	static void register_statistic(string name, std::initializer_list<Number*> list);
+	static void register_field_names(string name, std::initializer_list<string> list);
+	static double get_count(string name, int column);
+	static double get_sum(string name, int column);
+	static double get_average(string name, int column);
+	static double get_weighted_avg_of_col2_in_terms_of_col1(string name, int col1, int col2);	// Useful for calculating average values over time. Col1 1 is typically time in this case.
+	static double get_standard_deviation(string name, int column);
+	static void clean(string name);
+	static string to_csv(string name);
+	static map<string, StatisticData> statistics;
+private:
+	vector<string> names;			// titles of columns
+	vector<vector<Number*> > data;	// a table of data.
+};
+
 class StatisticsGatherer
 {
 public:
@@ -1127,11 +1251,12 @@ public:
 
 	void register_completed_event(Event const& event);
 	void register_scheduled_gc(Event const& gc);
-	void register_executed_gc(Event const& gc, Block const& victim);
+	void register_executed_gc(Block const& victim);
 	void register_events_queue_length(uint queue_size, double time);
-	void print();
+	void print() const;
 	void print_simple(FILE* file = stdout);
 	void print_gc_info();
+	void print_mapping_info();
 	void print_csv();
 	inline double get_wait_time_histogram_bin_size() { return wait_time_histogram_bin_size; }
 
@@ -1147,11 +1272,11 @@ public:
 	uint max_age();
 	uint max_age_freq();
 	vector<double> max_waittimes();
-	uint total_reads();
-	uint total_writes();
-	double get_reads_throughput();
-	double get_writes_throughput();
-	double get_total_throughput();
+	uint total_reads() const;
+	uint total_writes() const;
+	double get_reads_throughput() const;
+	double get_writes_throughput() const;
+	double get_total_throughput() const;
 
 	long num_gc_cancelled_no_candidate;
 	long num_gc_cancelled_not_enough_free_space;
@@ -1159,6 +1284,10 @@ public:
 
 	long get_num_erases_executed() { return num_erases; }
 	static void set_record_statistics(bool val) { record_statistics = val; }
+	vector<vector<uint> > num_erases_per_LUN;
+	vector<vector<uint> > num_writes_per_LUN;
+	vector<vector<uint> > num_gc_writes_per_LUN_origin;
+	vector<vector<uint> > num_gc_writes_per_LUN_destination;
 private:
 	static StatisticsGatherer *inst;
 //	Ssd & ssd;
@@ -1169,19 +1298,20 @@ private:
 	vector<vector<vector<double> > > bus_wait_time_for_reads_per_LUN;
 	vector<vector<uint> > num_reads_per_LUN;
 
+	vector<vector<uint> > num_mapping_reads_per_LUN;
+	vector<vector<uint> > num_mapping_writes_per_LUN;
+
 	vector<vector<vector<double> > > bus_wait_time_for_writes_per_LUN;
-	vector<vector<uint> > num_writes_per_LUN;
+
 
 	vector<vector<uint> > num_gc_reads_per_LUN;
-	vector<vector<uint> > num_gc_writes_per_LUN_origin;
-	vector<vector<uint> > num_gc_writes_per_LUN_destination;
 	vector<vector<double> > sum_gc_wait_time_per_LUN;
 	vector<vector<vector<double> > > gc_wait_time_per_LUN;
 	vector<vector<uint> > num_copy_backs_per_LUN;
 
 	long num_erases;
 	long num_gc_writes;
-	vector<vector<uint> > num_erases_per_LUN;
+
 
 	vector<vector<uint> > num_gc_scheduled_per_LUN;
 
@@ -1299,8 +1429,8 @@ public:
 	Experiment_Result(string experiment_name, string data_folder, string sub_folder, string variable_parameter_name);
 	~Experiment_Result();
 	void start_experiment();
-	void collect_stats(double variable_parameter_value);
-	void collect_stats(double variable_parameter_value, StatisticsGatherer* statistics_gatherer);
+	void collect_stats(string variable_parameter_value);
+	void collect_stats(string variable_parameter_value, StatisticsGatherer* statistics_gatherer);
 	void end_experiment();
 	double time_elapsed() { return end_time - start_time; }
 
@@ -1315,14 +1445,15 @@ public:
 	uint max_age_freq;
 	string graph_filename_prefix;
 	vector<double> max_waittimes;
-	map<double, vector<double> > vp_max_waittimes; // Varable parameter --> max waittimes for each waittime measurement type
-	map<double, vector<uint> > vp_num_IOs; // Varable parameter --> num_ios[write, read, write+read]
+	map<string, vector<double> > vp_max_waittimes; // Varable parameter --> max waittimes for each waittime measurement type
+	//map<double, vector<uint> > vp_num_IOs; // Varable parameter --> num_ios[write, read, write+read]
     static const string throughput_column_name; // e.g. "Average throughput (IOs/s)". Becomes y-axis on aggregated (for all experiments with different values for the variable parameter) throughput graph
     static const string write_throughput_column_name;
     static const string read_throughput_column_name;
     std::ofstream* stats_file;
     double start_time;
     double end_time;
+    vector<string> points;
 
 	static const string datafile_postfix;
 	static const string stats_filename;
@@ -1359,7 +1490,16 @@ private:
 	bool use_flexible_reads;
 };
 
+// This workload consists of 3 threads operating in parallel.
+// The logical address space is divided into two equal halves.
+// On the first half, one thread is doing random reads, and another is doing random writes.
+// On the other half, there is a file system emulating thread that performs large sequential writes.
 class File_System_With_Noise : public Workload_Definition {
+public:
+	vector<Thread*> generate();
+};
+
+class Synch_Random_Workload : public Workload_Definition {
 public:
 	vector<Thread*> generate();
 };
@@ -1380,16 +1520,20 @@ private:
 	double writes_probability;
 };
 
+// This workload starts with a large sequential write of the entire logical address space
+// After that an asynchronous thread performs random writes across the logical address space
 class Init_Workload : public Workload_Definition {
 public:
 	vector<Thread*> generate();
 };
 
+// This workload conists of a large sequential write of the entire logical address space
 class Init_Write : public Workload_Definition {
 public:
 	vector<Thread*> generate();
 };
 
+// This workload consists of a file system emulating thread that does many large file writes
 class Synch_Write : public Workload_Definition {
 public:
 	vector<Thread*> generate();
@@ -1405,13 +1549,13 @@ public:
 	static void draw_graph(int sizeX, int sizeY, string outputFile, string dataFilename, string title, string xAxisTitle, string yAxisTitle, string xAxisConf, string command);
 	static void draw_graph_with_histograms(int sizeX, int sizeY, string outputFile, string dataFilename, string title, string xAxisTitle, string yAxisTitle, string xAxisConf, string command, vector<string> histogram_commands);
 	static void graph(int sizeX, int sizeY, string title, string filename, int column, vector<Experiment_Result> experiments, int y_max = UNDEFINED, string subfolder = "");
-	static void latency_plot(int sizeX, int sizeY, string title, string filename, int column, int variable_parameter_value, Experiment_Result experiment, int y_max = UNDEFINED);
+	//static void latency_plot(int sizeX, int sizeY, string title, string filename, int column, int variable_parameter_value, Experiment_Result experiment, int y_max = UNDEFINED);
 	static void waittime_boxplot(int sizeX, int sizeY, string title, string filename, int mean_column, Experiment_Result experiment);
-	static void waittime_histogram(int sizeX, int sizeY, string outputFile, Experiment_Result experiment, vector<int> points, int black_column, int red_column = -1);
-    static void cross_experiment_waittime_histogram(int sizeX, int sizeY, string outputFile, vector<Experiment_Result> experiments, double point, int black_column, int red_column = -1);
-	static void age_histogram(int sizeX, int sizeY, string outputFile, Experiment_Result experiment, vector<int> points);
-	static void queue_length_history(int sizeX, int sizeY, string outputFile, Experiment_Result experiment, vector<int> points);
-	static void throughput_history(int sizeX, int sizeY, string outputFile, Experiment_Result experiment, vector<int> points);
+	static void waittime_histogram(int sizeX, int sizeY, string outputFile, Experiment_Result experiment, int black_column, int red_column = -1);
+    static void cross_experiment_waittime_histogram(int sizeX, int sizeY, string outputFile, vector<Experiment_Result> experiments, string point, int black_column, int red_column = -1);
+	static void age_histogram(int sizeX, int sizeY, string outputFile, Experiment_Result experiment);
+	static void queue_length_history(int sizeX, int sizeY, string outputFile, Experiment_Result experiment);
+	static void plot(int sizeX, int sizeY, string outputFile, Experiment_Result experiment, string csv_name, string title, string x_axis_label, string y_axis_label, int num_lines, int x_min = UNDEFINED, int x_max = UNDEFINED, int y_min = UNDEFINED, int y_max = UNDEFINED);
 	static string get_working_dir();
 	static void unify_under_one_statistics_gatherer(vector<Thread*> threads, StatisticsGatherer* statistics_gatherer);
 	template <class T> void simple_experiment_double(string name, T* variable, T min, T max, T inc);
@@ -1423,7 +1567,7 @@ public:
 	static vector<Experiment_Result> random_writes_on_the_side_experiment(Workload_Definition* workload, int write_threads_min, int write_threads_max, int write_threads_inc, string name, int IO_limit, double used_space, int random_writes_min_lba, int random_writes_max_lba);
 	static Experiment_Result copyback_experiment(vector<Thread*> (*experiment)(int highest_lba), int used_space, int max_copybacks, string data_folder, string name, int IO_limit);
 	static Experiment_Result copyback_map_experiment(vector<Thread*> (*experiment)(int highest_lba), int cb_map_min, int cb_map_max, int cb_map_inc, int used_space, string data_folder, string name, int IO_limit);
-
+	void set_exponential_increase(bool e) { exponential_increase = e; }
 	void draw_graphs();
 	void draw_aggregate_graphs();
 	void draw_experiment_spesific_graphs();
@@ -1460,7 +1604,7 @@ private:
 
 	string alternate_location_for_results_file;
 
-	static void multigraph(int sizeX, int sizeY, string outputFile, vector<string> commands, vector<string> settings = vector<string>());
+	static void multigraph(int sizeX, int sizeY, string outputFile, vector<string> commands, vector<string> settings = vector<string>(), int x_min = UNDEFINED, int x_max = UNDEFINED, int y_min = UNDEFINED, int y_max = UNDEFINED);
 
 	static uint max_age;
 	static const bool REMOVE_GLE_SCRIPTS_AGAIN;
@@ -1471,6 +1615,7 @@ private:
 	static double calibration_precision;      // microseconds
 	static double calibration_starting_point; // microseconds
 	static string base_folder;
+	bool exponential_increase;
 };
 
 class MTRand_int32 { // Mersenne Twister random number generator

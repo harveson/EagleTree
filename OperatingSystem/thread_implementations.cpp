@@ -7,7 +7,7 @@
 
 #include "../ssd.h"
 //#include "../MTRand/mtrand.h"
-
+#include <stdlib.h>
 using namespace ssd;
 
 // =================  Thread =============================
@@ -88,7 +88,7 @@ void Thread::stop() {
 	stopped = true;
 }
 
-bool Thread::is_stopped() {
+bool Thread::is_stopped() const {
 	return stopped;
 }
 
@@ -117,7 +117,8 @@ Simple_Thread::Simple_Thread(IO_Pattern* generator, IO_Mode_Generator* mode_gen,
 	  MAX_IOS(MAX_OUTSTANDING_IOS),
 	  io_gen(generator),
 	  io_type_gen(mode_gen),
-	  number_of_times_to_repeat(num_IOs)
+	  number_of_times_to_repeat(num_IOs),
+	  io_size(1)
 {
 	assert(MAX_IOS > 0);
 }
@@ -126,7 +127,8 @@ Simple_Thread::Simple_Thread(IO_Pattern* generator, int MAX_IOS, IO_Mode_Generat
 	: Thread(),
 	  MAX_IOS(MAX_IOS),
 	  io_gen(generator),
-	  io_type_gen(mode_gen)
+	  io_type_gen(mode_gen),
+	  io_size(1)
 {
 	assert(MAX_IOS > 0);
 	number_of_times_to_repeat = generator->max_LBA - generator->min_LBA + 1;
@@ -142,7 +144,7 @@ void Simple_Thread::generate_io() {
 		number_of_times_to_repeat--;
 		event_type type = io_type_gen->next();
 		long logical_addr = io_gen->next();
-		Event* e = new Event(type, logical_addr, 1, get_current_time());
+		Event* e = new Event(type, logical_addr, io_size, get_current_time());
 		submit(e);
 	}
 
@@ -156,6 +158,50 @@ void Simple_Thread::handle_event_completion(Event* event) {
 	if (number_of_times_to_repeat > 0) {
 		generate_io();
 	}
+}
+
+Random_IO_Pattern_Collision_Free::Random_IO_Pattern_Collision_Free(long min_LBA, long max_LBA, ulong seed) : IO_Pattern(min_LBA, max_LBA), random_number_generator(seed), counter(0) {
+	reinit();
+};
+
+void Random_IO_Pattern_Collision_Free::reinit() {
+	candidates.clear();
+	candidates.reserve(max_LBA - min_LBA);
+	for (int i = min_LBA; i < max_LBA; i++ ) {
+		candidates.push_back(i);
+	}
+}
+
+int Random_IO_Pattern_Collision_Free::next() {
+	bool found = false;
+	int index = UNDEFINED;
+
+	do {
+		index = random_number_generator() % candidates.size();
+		if (candidates[index] != UNDEFINED) {
+			found = true;
+		}
+	} while (!found);
+	int lba = candidates[index];
+	candidates[index] = UNDEFINED;
+	if (candidates.size() == 1 && candidates.front() == UNDEFINED) {
+		reinit();
+		counter = candidates.size();
+	}
+	if (++counter >= candidates.size() / 2) {
+		vector<int> new_candidates;
+		new_candidates.reserve(candidates.size() / 2);
+		for (auto i : candidates) {
+			if (i != UNDEFINED) {
+				new_candidates.push_back(i);
+			}
+		}
+		candidates = new_candidates;
+		//printf("size %d\n", candidates.size());
+		counter = 0;
+	}
+
+	return lba;
 }
 
 // =================  Flexible_Reader_Thread  =============================
@@ -227,3 +273,9 @@ void Collision_Free_Asynchronous_Random_Thread::issue_first_IOs() {
 void Collision_Free_Asynchronous_Random_Thread::handle_event_completion(Event* event) {
 	logical_addresses_submitted.erase(event->get_logical_address());
 }*/
+
+
+
+
+
+

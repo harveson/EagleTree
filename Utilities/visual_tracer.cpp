@@ -60,6 +60,7 @@ void mark_as_gc_or_app(bool gc, bool app, vector<vector<char> >& symbols) {
 }
 
 void VisualTracer::register_completed_event(Event& event) {
+	//write_to_file = true;
 	if (event.get_event_type() == TRIM || !write_to_file) {
 		return;
 	}
@@ -72,7 +73,7 @@ void VisualTracer::register_completed_event(Event& event) {
 	if (type == WRITE) {
 		write(add.package, add.die, 't', 2 * BUS_CTRL_DELAY + BUS_DATA_DELAY);
 		vector<vector<char> > symbols;
-		vector<char> logical_address = get_int_as_char_vector(event.get_logical_address());
+		vector<char> logical_address = get_int_as_char_vector(event.get_id());
 		symbols.push_back(logical_address);
 		vector<char> wait_time = get_int_as_char_vector(floor(event.get_bus_wait_time()));
 		symbols.push_back(wait_time);
@@ -134,9 +135,9 @@ void VisualTracer::register_completed_event(Event& event) {
 		//print_horizontally(10000);
 		//Utilization_Meter::print();
 		if (write_to_file) {
-			write_file();
+			//write_file();
 		} else {
-			trim_from_start(100000 / 2);
+			//trim_from_start(100000 / 2);
 		}
 	}
 

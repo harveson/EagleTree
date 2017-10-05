@@ -15,11 +15,13 @@
 using namespace ssd;
 using namespace std;
 
+double Block_manager_parent::soonest_write_time = 0;
+
 Block_manager_parent::Block_manager_parent(int num_age_classes)
  : ssd(NULL),
    ftl(NULL),
    free_block_pointers(SSD_SIZE, vector<Address>(PACKAGE_SIZE)),
-   free_blocks(SSD_SIZE, vector<vector<vector<Address> > >(PACKAGE_SIZE, vector<vector<Address> >(num_age_classes, vector<Address>(0)) )),
+   free_blocks(SSD_SIZE, vector<vector<deque<Address> > >(PACKAGE_SIZE, vector<deque<Address> >(num_age_classes, deque<Address>(0)) )),
    all_blocks(0),
    num_age_classes(num_age_classes),
    num_free_pages(SSD_SIZE * PACKAGE_SIZE * DIE_SIZE * PLANE_SIZE * BLOCK_SIZE),
@@ -86,9 +88,10 @@ Address Block_manager_parent::choose_flexible_read_address(Flexible_Read_Event* 
 	return candidates[coor.first][coor.second];
 }
 
-Address Block_manager_parent::choose_write_address(Event const& write) {
+Address Block_manager_parent::choose_write_address(Event& write) {
 	//printf("num_available_pages_for_new_writes   %d\n", num_available_pages_for_new_writes);
 	bool can_write = num_available_pages_for_new_writes > 0 || write.is_garbage_collection_op();
+
 	if (!can_write) {
 		return Address();
 	}
@@ -102,7 +105,7 @@ Address Block_manager_parent::choose_write_address(Event const& write) {
 		return a;
 	}
 
-	if (!write.is_garbage_collection_op() && migrator->how_many_gc_operations_are_scheduled() == 0) {
+	if (GREED_SCALE > 0 && !write.is_garbage_collection_op() && migrator->how_many_gc_operations_are_scheduled() == 0) {
 		migrator->schedule_gc(write.get_current_time(), -1, -1, -1 ,-1);
 	}
 	if (write.is_garbage_collection_op() || migrator->how_many_gc_operations_are_scheduled() == 0) {
@@ -114,13 +117,14 @@ Address Block_manager_parent::choose_write_address(Event const& write) {
 	return Address();
 }
 
-void Block_manager_parent::register_erase_outcome(Event const& event, enum status status) {
+void Block_manager_parent::register_erase_outcome(Event& event, enum status status) {
 	IO_has_completed_since_last_shortest_queue_search = true;
 
 	Address a = event.get_address();
 	a.valid = PAGE;
 	a.page = 0;
 	//Block* b = &ssd->get_package()[a.package]->get_die()[a.die].getPlanes()[a.plane].getBlocks()[a.block];
+	//StatisticsGatherer::get_global_instance()->print();
 
 	wl->register_erase_completion(event);
 
@@ -144,13 +148,15 @@ void Block_manager_parent::register_erase_outcome(Event const& event, enum statu
 
 	num_free_pages += BLOCK_SIZE;
 	num_available_pages_for_new_writes += BLOCK_SIZE;
+	//printf("%d   %d\n", num_available_pages_for_new_writes, num_free_pages);
 	Free_Space_Meter::register_num_free_pages_for_app_writes(num_available_pages_for_new_writes, event.get_current_time());
 
 	if (migrator->how_many_gc_operations_are_scheduled() == 0) {
 		assert(num_free_pages == num_available_pages_for_new_writes);
 	}
 
-	Block_manager_parent::check_if_should_trigger_more_GC(event.get_current_time());
+	check_if_should_trigger_more_GC(event);
+
 }
 
 void Block_manager_parent::register_write_arrival(Event const& write) {
@@ -188,6 +194,7 @@ void Block_manager_parent::register_write_outcome(Event const& event, enum statu
 		num_available_pages_for_new_writes--;
 		Free_Space_Meter::register_num_free_pages_for_app_writes(num_available_pages_for_new_writes, event.get_current_time());
 	}
+	//printf("%d   %d\n", num_available_pages_for_new_writes, num_free_pages);
 	// if there are very few pages left, need to trigger emergency GC
 	if (num_free_pages <= BLOCK_SIZE && migrator->how_many_gc_operations_are_scheduled() == 0) {
 		migrator->schedule_gc(event.get_current_time(), -1, -1, -1, -1);
@@ -204,14 +211,18 @@ void Block_manager_parent::register_write_outcome(Event const& event, enum statu
 			if (has_free_pages(free_pointer)) {
 				free_block_pointers[ba.package][ba.die] = free_pointer;
 			}
-			else {
-				Free_Space_Per_LUN_Meter::mark_out_of_space(ba, event.get_current_time() );
-			}
 			if (PRINT_LEVEL > 1) {
 				if (free_pointer.valid == NONE) printf(", and a new unused block could not be found.\n");
 				else printf(".\n");
 			}
 		}
+	}
+
+	if (!has_free_pages(free_block_pointers[ba.package][ba.die])) {
+		Free_Space_Per_LUN_Meter::mark_out_of_space(ba, event.get_current_time());
+	}
+	else {
+		Free_Space_Per_LUN_Meter::mark_new_space(ba, event.get_current_time());
 	}
 }
 
@@ -219,7 +230,42 @@ void Block_manager_parent::trim(Event const& event) {
 	IO_has_completed_since_last_shortest_queue_search = true;
 }
 
-int Block_manager_parent::get_num_free_blocks(int package, int die) {
+int Block_manager_parent::get_num_pointers_with_free_space() const {
+	int sum = 0;
+	for (int i = 0; i < SSD_SIZE; i++) {
+		for (int j = 0; j < PACKAGE_SIZE; j++) {
+			if (has_free_pages(free_block_pointers[i][j])) {
+				sum++;
+			}
+		}
+	}
+	return sum;
+}
+
+int Block_manager_parent::get_num_free_blocks() const {
+	int sum = 0;
+	for (int i = 0; i < SSD_SIZE; i++) {
+		for (int j = 0; j < PACKAGE_SIZE; j++) {
+			sum += get_num_free_blocks(i, j);
+		}
+	}
+	return sum;
+}
+
+void Block_manager_parent::print_free_blocks() const {
+	for (int i = 0; i < SSD_SIZE; i++) {
+		for (int j = 0; j < PACKAGE_SIZE; j++) {
+			for (int k = 0; k < num_age_classes; k++) {
+				for (auto& q : free_blocks[i][j][k]) {
+					q.print();
+					printf("\n");
+				}
+			}
+		}
+	}
+}
+
+int Block_manager_parent::get_num_free_blocks(int package, int die) const {
 	int num_free_blocks = 0;
 	for (int i = 0; i < num_age_classes; i++) {
 		num_free_blocks += free_blocks[package][die][i].size();
@@ -242,16 +288,16 @@ bool Block_manager_parent::can_write(Event const& write) const {
 	return num_available_pages_for_new_writes > 0 || write.is_garbage_collection_op();
 }
 
-void Block_manager_parent::check_if_should_trigger_more_GC(double start_time) {
+void Block_manager_parent::check_if_should_trigger_more_GC(Event const& event) {
 	if (num_free_pages <= BLOCK_SIZE) {
-		migrator->schedule_gc(start_time, -1, -1, -1, -1);
+		migrator->schedule_gc(event.get_current_time(), -1, -1, -1, -1);
 	}
 
 	int num_luns_with_space = SSD_SIZE * PACKAGE_SIZE;
 	for (uint i = 0; i < SSD_SIZE; i++) {
 		for (uint j = 0; j < PACKAGE_SIZE; j++) {
 			if (!has_free_pages(free_block_pointers[i][j]) || get_num_free_blocks(i, j) < GREED_SCALE) {
-				migrator->schedule_gc(start_time, i, j, -1, -1);
+				migrator->schedule_gc(event.get_current_time(), i, j, -1, -1);
 			}
 			if (!has_free_pages(free_block_pointers[i][j])) {
 				num_luns_with_space--;
@@ -322,24 +368,6 @@ Address Block_manager_parent::get_free_block_pointer_with_shortest_IO_queue() {
 }
 
 bool Block_manager_parent::Copy_backs_in_progress(Address const& addr) {
-	/*if (addr.page > 0) {
-		BlockAnastasia
-3 days ago
-Hi, Niv Ok, thank you for answer ) Anastasia
-Thorsgade, Copenhagen, Capital Region of Denmark (May 7 - 12, 2013)
-Inquiry
-2246 kr DKK
-Julie
-4 days ago
-Hi Julie, I'm just on my way home, I'll try to be as fast as p...
-Thorsgade, Copenhagen, Capital Region of Denmark
-Delete
-Hanna
-4 days ago
-Hey Niv, Thanks that sounds fairy easy! A& block = ssd.get_package()[addr.package]->get_die()[addr.die].getPlanes()[addr.plane].getBlocks()[addr.block];
-		Page const& page_before = block.getPages()[addr.page - 1];
-		return page_before.get_state() == EMPTY;
-	}*/
 	return false;
 }
 
@@ -354,10 +382,15 @@ double Block_manager_parent::in_how_long_can_this_event_be_scheduled(Address con
 	double channel_finish_time = ssd->get_currently_executing_operation_finish_time(package_id);
 	double die_finish_time = ssd->get_package(package_id)->get_die(die_id)->get_currently_executing_io_finish_time();
 	double max_time = max(channel_finish_time, die_finish_time);
-	double time = max(0.0, max_time - event_time);
+	double time = fmax(0.0, max_time - event_time);
 	if (type == WRITE) {
-		time = min(time, BUS_DATA_DELAY + BUS_CTRL_DELAY);
+		time = fmin(time, BUS_DATA_DELAY + BUS_CTRL_DELAY);
+		return time; // in_how_long_can_this_write_be_scheduled(event_time);
 	}
+	/*if (alternative_time > time) {
+		int i = 0;
+		i++;
+	}*/
 	return time;
 }
 
@@ -368,12 +401,31 @@ double Block_manager_parent::in_how_long_can_this_write_be_scheduled(double curr
 		for (int j = 0; j < PACKAGE_SIZE; j++) {
 			bool busy = ssd->get_package(i)->get_die(j)->register_is_busy();
 			double die_finish_time = ssd->get_package(i)->get_die(j)->get_currently_executing_io_finish_time();
-			die_finish_time += busy ? BUS_DATA_DELAY + BUS_CTRL_DELAY : 0;
-			double max_time = max(channel_finish_time, die_finish_time);
-			min_execution_time = min(min_execution_time, max_time);
+			double max_time = fmax(channel_finish_time, die_finish_time);
+			max_time += busy ? BUS_DATA_DELAY + BUS_CTRL_DELAY : 0;
+			min_execution_time = fmin(min_execution_time, max_time);
 		}
 	}
-	return max(min_execution_time - current_time, 0.0);
+	return fmax(min_execution_time - current_time, 0.0);
+}
+
+double Block_manager_parent::in_how_long_can_this_write_be_scheduled2(double current_time) const {
+	return fmax(0.0, soonest_write_time - current_time);
+}
+
+void Block_manager_parent::update_next_possible_write_time() const {
+	double min_execution_time = INFINITE;
+	for (int i = 0; i < SSD_SIZE; i++) {
+		double channel_finish_time = ssd->get_currently_executing_operation_finish_time(i);
+		for (int j = 0; j < PACKAGE_SIZE; j++) {
+			bool busy = ssd->get_package(i)->get_die(j)->register_is_busy();
+			double die_finish_time = ssd->get_package(i)->get_die(j)->get_currently_executing_io_finish_time();
+			double max_time = fmax(channel_finish_time, die_finish_time);
+			max_time += busy ? BUS_DATA_DELAY + BUS_CTRL_DELAY : 0;
+			min_execution_time = fmin(min_execution_time, max_time);
+		}
+	}
+	soonest_write_time = min_execution_time;
 }
 
 bool Block_manager_parent::can_schedule_on_die(Address const& address, event_type type, uint app_io_id) const {
@@ -401,17 +453,10 @@ bool Block_manager_parent::can_schedule_write_immediately(Address const& prospec
 	return free_pages && die_not_busy && no_copy_back && can_be_scheduled_now;
 }
 
-// puts free blocks at the very end of the queue
-struct block_valid_pages_comparator_wearwolf {
-	bool operator () (const Block * i, const Block * j)
-	{
-		return i->get_pages_invalid() > j->get_pages_invalid();
-	}
-};
-
 void Block_manager_parent::register_trim_making_gc_redundant(Event* trim) {
 	if (PRINT_LEVEL > 1) {
 		printf("a trim made a gc event redundant\n");
+		//printf("%d   %d\n", num_available_pages_for_new_writes, num_free_pages);
 	}
 	num_available_pages_for_new_writes++;
 	Free_Space_Meter::register_num_free_pages_for_app_writes(num_available_pages_for_new_writes, trim->get_current_time());
@@ -470,6 +515,9 @@ Address Block_manager_parent::find_free_unused_block(uint package_id, uint die_i
 		num_free_blocks_left--;
 		assert(has_free_pages(to_return));
 	}
+	if (to_return.valid != NONE &&  num_free_blocks_left == 0) {
+		//StateVisualiser::print_page_status();
+	}
 	if (num_free_blocks_left < GREED_SCALE) {
 		migrator->schedule_gc(time, package_id, die_id, -1, -1);
 	}
@@ -511,10 +559,10 @@ Address Block_manager_parent::find_free_unused_block(enum age age, double time) 
 	return Address();
 }
 
-void Block_manager_parent::return_unfilled_block(Address pba, double current_time) {
+void Block_manager_parent::return_unfilled_block(Address pba, double current_time, bool give_to_block_pointers) {
 	if (has_free_pages(pba)) {
 		int age_class = sort_into_age_class(pba);
-		if (has_free_pages(free_block_pointers[pba.package][pba.die])) {
+		if (!give_to_block_pointers || has_free_pages(free_block_pointers[pba.package][pba.die])) {
 			free_blocks[pba.package][pba.die][age_class].push_back(pba);
 		} else {
 			free_block_pointers[pba.package][pba.die] = pba;
@@ -547,8 +595,64 @@ Block_manager_parent* Block_manager_parent::get_new_instance() {
 		case 1: bm = new Shortest_Queue_Hot_Cold_BM(); break;
 		case 2: bm = new Sequential_Locality_BM(); break;
 		case 3: bm = new Block_manager_roundrobin(); break;
-		case 4: bm = new Wearwolf(); break;
+		case 5: bm = new Block_Manager_Tag_Groups(); break;
+		case 6: bm = new Block_Manager_Groups(); break;
+		case 7: bm = new bm_gc_locality(); break;
 		default: bm = new Block_manager_parallel(); break;
 	}
 	return bm;
 }
+
+pointers::pointers(Block_manager_parent* bm) : bm(bm), blocks(SSD_SIZE, vector<Address>(PACKAGE_SIZE, Address())) {
+	for (int i = 0; i < SSD_SIZE; i++) {
+		for (int j = 0; j < PACKAGE_SIZE; j++) {
+			blocks[i][j] = bm->find_free_unused_block(i, j, 0);
+		}
+	}
+}
+
+pointers::pointers() : bm(NULL), blocks(SSD_SIZE, vector<Address>(PACKAGE_SIZE, Address())) {
+}
+
+
+void pointers::register_completion(Event const& e) {
+	blocks[e.get_address().package][e.get_address().die].page++;
+}
+Address pointers::get_best_block(Block_manager_parent* bm) const {
+	pair<bool, pair<int, int> > result = bm->get_free_block_pointer_with_shortest_IO_queue(blocks);
+	if (result.first) {
+		return blocks[result.second.first][result.second.second];
+	}
+	return Address();
+}
+
+void pointers::print() const {
+	for (int i = 0; i < blocks.size(); i++) {
+		for (int j = 0; j < blocks[i].size(); j++) {
+			printf("%d %d %d\n", i, j, blocks[i][j].page);
+		}
+	}
+}
+
+int pointers::get_num_free_blocks() const {
+	int num_free_blocks = 0;
+	for (int i = 0; i < blocks.size(); i++) {
+		for (int j = 0; j < blocks[i].size(); j++) {
+			if (blocks[i][j].page < BLOCK_SIZE && blocks[i][j].valid == PAGE) {
+				num_free_blocks++;
+			}
+		}
+	}
+	return num_free_blocks;
+}
+
+void pointers::retire(double current_time) {
+	int num_free_blocks = 0;
+	for (int i = 0; i < blocks.size(); i++) {
+		for (int j = 0; j < blocks[i].size(); j++) {
+			//bm->free_blocks[i][j].push_back(blocks[i][j]);
+			bm->return_unfilled_block(blocks[i][j], current_time, false);
+		}
+	}
+}
+

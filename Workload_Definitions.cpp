@@ -65,8 +65,8 @@ vector<Thread*> Random_Workload::generate() {
 	Simple_Thread* init_write = new Asynchronous_Sequential_Writer(min_lba, max_lba);
 	for (int i = 0; i < num_threads; i++) {
 		int seed = 23621 * i + 62;
-		Simple_Thread* writer = new Synchronous_Random_Writer(min_lba, max_lba / 2, seed);
-		Simple_Thread* reader = new Synchronous_Random_Reader(min_lba, max_lba / 2, seed * 136);
+		Simple_Thread* writer = new Synchronous_Random_Writer(min_lba, max_lba, seed);
+		Simple_Thread* reader = new Synchronous_Random_Reader(min_lba, max_lba, seed * 136);
 		init_write->add_follow_up_thread(reader);
 		init_write->add_follow_up_thread(writer);
 		writer->set_num_ios(INFINITE);
@@ -102,7 +102,9 @@ vector<Thread*> Asynch_Random_Workload::generate() {
 vector<Thread*> Init_Workload::generate() {
 	Simple_Thread* init_write = new Asynchronous_Sequential_Writer(min_lba, max_lba);
 	Simple_Thread* thread = new Asynchronous_Random_Writer(min_lba, max_lba, 23623);
+	//Simple_Thread* thread1 = new Asynchronous_Random_Reader(min_lba, max_lba, 2363);
 	init_write->add_follow_up_thread(thread);
+	//init_write->add_follow_up_thread(thread1);
 	vector<Thread*> threads(1, init_write);
 	return threads;
 }
@@ -150,7 +152,7 @@ vector<Thread*> File_System_With_Noise::generate() {
 	seq->add_follow_up_thread(t3);
 
 	vector<Thread*> threads;
-	threads.push_back(seq);
+	threads.push_back(t3);
 	//threads.push_back(t4);
 
 	Individual_Threads_Statistics::init();
@@ -163,3 +165,7 @@ vector<Thread*> File_System_With_Noise::generate() {
 	return threads;
 }
 
+vector<Thread*> Synch_Random_Workload::generate() {
+	Simple_Thread* t = new Synchronous_Random_Writer(min_lba, max_lba, 2345);
+	return vector<Thread*>(1, t);
+}

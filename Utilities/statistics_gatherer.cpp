@@ -23,6 +23,8 @@ StatisticsGatherer::StatisticsGatherer()
 	  num_gc_cancelled_gc_already_happening(0),
 	  bus_wait_time_for_reads_per_LUN(SSD_SIZE, vector<vector<double> >(PACKAGE_SIZE, vector<double>())),
 	  num_reads_per_LUN(SSD_SIZE, vector<uint>(PACKAGE_SIZE, 0)),
+	  num_mapping_reads_per_LUN(SSD_SIZE, vector<uint>(PACKAGE_SIZE, 0)),
+	  num_mapping_writes_per_LUN(SSD_SIZE, vector<uint>(PACKAGE_SIZE, 0)),
 	  bus_wait_time_for_writes_per_LUN(SSD_SIZE, vector<vector<double> >(PACKAGE_SIZE, vector<double>())),
 	  num_writes_per_LUN(SSD_SIZE, vector<uint>(PACKAGE_SIZE, 0)),
 	  num_gc_reads_per_LUN(SSD_SIZE, vector<uint>(PACKAGE_SIZE, 0)),
@@ -53,7 +55,9 @@ StatisticsGatherer::StatisticsGatherer()
 vector<vector<double> > num_valid_pages_per_gc_op;
 vector<vector<int> > num_executed_gc_ops;
 
-StatisticsGatherer::~StatisticsGatherer() {}
+StatisticsGatherer::~StatisticsGatherer() {
+
+}
 
 void StatisticsGatherer::init()
 {
@@ -86,6 +90,15 @@ void StatisticsGatherer::register_completed_event(Event const& event) {
 		if (event.is_original_application_io()) {
 			num_writes_per_LUN[a.package][a.die]++;
 			bus_wait_time_for_writes_per_LUN[a.package][a.die].push_back(event.get_latency());
+
+			/*StatisticData::register_statistic("all_writes", {
+					new Integer(event.get_latency())
+			});
+
+			StatisticData::register_field_names("all_writes", {
+					"write_latency"
+			});*/
+
 		}
 		else if (event.is_wear_leveling_op()) {
 			Address replace_add = event.get_replace_address();
@@ -99,13 +112,29 @@ void StatisticsGatherer::register_completed_event(Event const& event) {
 
 			sum_gc_wait_time_per_LUN[a.package][a.die] += event.get_latency();
 			gc_wait_time_per_LUN[a.package][a.die].push_back(event.get_latency());
+
+		}
+		else if (event.is_mapping_op()) {
+			num_mapping_writes_per_LUN[a.package][a.die]++;
 		}
 	} else if (event.get_event_type() == READ_TRANSFER) {
 		if (event.is_original_application_io()) {
 			bus_wait_time_for_reads_per_LUN[a.package][a.die].push_back(event.get_latency());
 			num_reads_per_LUN[a.package][a.die]++;
+
+
+			/*StatisticData::register_statistic("all_reads", {
+					new Integer(event.get_latency())
+			});
+
+			StatisticData::register_field_names("all_reads", {
+					"read_latency"
+			});*/
+
 		} else if (event.is_garbage_collection_op()) {
 			num_gc_reads_per_LUN[a.package][a.die]++;
+		} else if (event.is_mapping_op()) {
+			num_mapping_reads_per_LUN[a.package][a.die]++;
 		}
 	} else if (event.get_event_type() == ERASE) {
 		num_erases_per_LUN[a.package][a.die]++;
@@ -160,11 +189,11 @@ void StatisticsGatherer::register_scheduled_gc(Event const& gc) {
 	}
 }
 
-void StatisticsGatherer::register_executed_gc(Event const& gc, Block const& victim) {
+void StatisticsGatherer::register_executed_gc(Block const& victim) {
 	if (!record_statistics) {
 		return;
 	}
-	if (inst != this) inst->register_executed_gc(gc, victim); // Do the same for global instance
+	if (inst != this) inst->register_executed_gc(victim); // Do the same for global instance
 	num_gc_executed++;
 	num_migrations += victim.get_pages_valid();
 	Address a = Address(victim.get_physical_address(), BLOCK);
@@ -291,7 +320,7 @@ void flatten(vector<vector<vector<T> > > const& vec, vector<T>& outcome)
 }
 
 
-void StatisticsGatherer::print() {
+void StatisticsGatherer::print() const {
 	printf("\n\t");
 	printf("num writes\t");
 	printf("num reads\t");
@@ -390,6 +419,33 @@ void StatisticsGatherer::print() {
 	printf("\n\n");
 }
 
+void StatisticsGatherer::print_mapping_info() {
+	int all_mapping_reads = get_sum(num_mapping_reads_per_LUN);
+	if (all_mapping_reads == 0) {
+		return;
+	}
+
+	printf("\n\t");
+	printf("map writes\t");
+	printf("map reads\t");
+	printf("\n");
+
+	for (uint i = 0; i < SSD_SIZE; i++) {
+		for (uint j = 0; j < PACKAGE_SIZE; j++) {
+			printf("C%d D%d\t", i, j);
+			printf("%d\t\t", num_mapping_writes_per_LUN[i][j]);
+			printf("%d\t\t", num_mapping_reads_per_LUN[i][j]);
+			printf("\n");
+		}
+	}
+
+	printf("\nTotals:\t");
+
+	printf("%d\t\t", (int) get_sum(num_mapping_writes_per_LUN));
+	printf("%d\t\t", (int) all_mapping_reads);
+	printf("\n\n");
+}
+
 void StatisticsGatherer::print_simple(FILE* stream) {
 
 	vector<double> all_write_latency;
@@ -480,6 +536,7 @@ void StatisticsGatherer::print_gc_info() {
 	printf("num scheduled gc: %ld \n", num_gc_scheduled);
 	printf("num executed gc: %ld \n", num_gc_executed);
 	printf("num migrations per gc: %f \n", (double)num_migrations / num_gc_executed);
+	printf("standard dev num migrations per gc: %f \n", StatisticData::get_standard_deviation("GC_eff_with_writes", 1));
 	printf("\n");
 	printf("gc targeting package die class: %ld \n", num_gc_targeting_package_die_class);
 	printf("gc targeting package die: %ld \n", num_gc_targeting_package_die);
@@ -519,51 +576,51 @@ vector<string> StatisticsGatherer::totals_vector_header() {
 	result.push_back("Copybacks");
 	result.push_back("Erases");
 
-	result.push_back("Write latency, mean (µs)"); // 10
-	result.push_back("Write latency, min (µs)");
-	result.push_back("Write latency, Q25 (µs)");
-	result.push_back("Write latency, Q50 (µs)");
-	result.push_back("Write latency, Q75 (µs)");
-	result.push_back("Write latency, max (µs)");
-	result.push_back("Write latency, stdev (µs)");
+	result.push_back("Write latency, mean (us)"); // 10
+	result.push_back("Write latency, min (us)");
+	result.push_back("Write latency, Q25 (us)");
+	result.push_back("Write latency, Q50 (us)");
+	result.push_back("Write latency, Q75 (us)");
+	result.push_back("Write latency, max (us)");
+	result.push_back("Write latency, stdev (us)");
 
-	result.push_back("Read latency, mean (µs)");
-	result.push_back("Read latency, min (µs)");
-	result.push_back("Read latency, Q25 (µs)"); // 20
-	result.push_back("Read latency, Q50 (µs)");
-	result.push_back("Read latency, Q75 (µs)");
-	result.push_back("Read latency, max (µs)");
-	result.push_back("Read latency, stdev (µs)");
+	result.push_back("Read latency, mean (us)");
+	result.push_back("Read latency, min (us)");
+	result.push_back("Read latency, Q25 (us)"); // 20
+	result.push_back("Read latency, Q50 (us)");
+	result.push_back("Read latency, Q75 (us)");
+	result.push_back("Read latency, max (us)");
+	result.push_back("Read latency, stdev (us)");
 
-	result.push_back("GC latency, stdev (µs)"); // 25
+	result.push_back("GC latency, stdev (us)"); // 25
 	result.push_back("Channel Utilization (%)");
 
 	result.push_back("GC Efficiency");
 
-	//result.push_back("max write wait (µs)"); // 15
-	//result.push_back("max read wait (µs)");
-	//result.push_back("max GC wait (µs)");
-	// Sustainable throughput (µs) 18
+	//result.push_back("max write wait (us)"); // 15
+	//result.push_back("max read wait (us)");
+	//result.push_back("max GC wait (us)");
+	// Sustainable throughput (us) 18
 	return result;
 }
 
-uint StatisticsGatherer::total_reads() {
+uint StatisticsGatherer::total_reads() const {
 	return get_sum(num_reads_per_LUN);
 }
 
-uint StatisticsGatherer::total_writes() {
+uint StatisticsGatherer::total_writes() const {
 	return get_sum(num_writes_per_LUN);
 }
 
-double StatisticsGatherer::get_reads_throughput() {
+double StatisticsGatherer::get_reads_throughput() const {
 	return (total_reads() / end_time) * 1000 * 1000;
 }
 
-double StatisticsGatherer::get_writes_throughput() {
+double StatisticsGatherer::get_writes_throughput() const {
 	return (total_writes() / end_time) * 1000 * 1000;
 }
 
-double StatisticsGatherer::get_total_throughput() {
+double StatisticsGatherer::get_total_throughput() const {
 	return get_reads_throughput() + get_writes_throughput();
 }
 

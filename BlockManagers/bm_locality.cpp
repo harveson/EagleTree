@@ -7,7 +7,7 @@ using namespace std;
 Sequential_Locality_BM::Sequential_Locality_BM()
 	: Block_manager_parallel(),
 	  seq_write_key_to_pointers_mapping(),
-	  detector(new Sequential_Pattern_Detector(WEARWOLF_LOCALITY_THRESHOLD)),
+	  detector(new Sequential_Pattern_Detector(SEQUENTIAL_LOCALITY_THRESHOLD)),
 	  strat(SHOREST_QUEUE),
 	  random_number_generator(1111),
 	  num_hits(0),
@@ -49,19 +49,19 @@ void Sequential_Locality_BM::register_write_arrival(Event const& event) {
 
 	sequential_writes_tracking const& swt = detector->register_event(lb, event.get_current_time());
 	// checks if should allocate pointers for the pattern
-	if (swt.num_times_pattern_has_repeated == 0 && swt.counter == WEARWOLF_LOCALITY_THRESHOLD) {
+	if (swt.num_times_pattern_has_repeated == 0 && swt.counter == SEQUENTIAL_LOCALITY_THRESHOLD) {
 		if (PRINT_LEVEL > 1) {
 			printf("SEQUENTIAL PATTERN IDENTIFIED!  KEY: %d \n", swt.key);
 		}
 		set_pointers_for_sequential_write(swt.key, event.get_current_time());
 	}
-	if (swt.num_times_pattern_has_repeated > 0 || swt.counter >= WEARWOLF_LOCALITY_THRESHOLD) {
+	if (swt.num_times_pattern_has_repeated > 0 || swt.counter >= SEQUENTIAL_LOCALITY_THRESHOLD) {
 		arrived_writes_to_sequential_key_mapping[event.get_id()] = swt.key;
 	}
 }
 
 
-Address Sequential_Locality_BM::choose_best_address(Event const& event) {
+Address Sequential_Locality_BM::choose_best_address(Event& event) {
 
 	if (event.is_garbage_collection_op()) {
 		num_misses++;
@@ -120,7 +120,7 @@ Address Sequential_Locality_BM::choose_any_address(Event const& write) {
 	return Address();
 }
 
-Address Sequential_Locality_BM::perform_sequential_write(Event const& event, long key) {
+Address Sequential_Locality_BM::perform_sequential_write(Event& event, long key) {
 	Address to_return;
 	assert(key >= 0);
 	sequential_writes_pointers& swp = seq_write_key_to_pointers_mapping[key];
@@ -206,6 +206,7 @@ void Sequential_Locality_BM::set_pointers_for_tagged_sequential_write(int tag, d
 	seq_write_key_to_pointers_mapping[key].tag = tag;
 	vector<vector<Address> >& pointers = seq_write_key_to_pointers_mapping[key].pointers = vector<vector<Address> >(SSD_SIZE, vector<Address>(PACKAGE_SIZE));
 	int random_offset = random_number_generator();
+	//num_blocks_to_allocate_now = 1;
 	for (int i = 0 ; i < num_blocks_to_allocate_now; i++) {
 		int random_index = random_offset + i;
 		uint package = random_index % SSD_SIZE;
@@ -334,13 +335,13 @@ void Sequential_Locality_BM::sequential_event_metadata_removed(long key, double 
 	for (uint i = 0; i < a.pointers.size(); i++) {
 		for (uint j = 0; j < a.pointers[i].size(); j++) {
 			Address& pointer = a.pointers[i][j];
-			Block_manager_parent::return_unfilled_block(pointer, current_time);
+			Block_manager_parent::return_unfilled_block(pointer, current_time, true);
 		}
 	}
 	seq_write_key_to_pointers_mapping.erase(key);
 }
 
-void Sequential_Locality_BM::register_erase_outcome(Event const& event, enum status status) {
+void Sequential_Locality_BM::register_erase_outcome(Event& event, enum status status) {
 	Block_manager_parallel::register_erase_outcome(event, status);
 	int i, j;
 	if (parallel_degree == ONE) {

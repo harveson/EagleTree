@@ -45,11 +45,14 @@ void IOScheduler::init() {
 	Priorty_Scheme* ps;
 	switch (SCHEDULING_SCHEME) {
 		case 0: ps = new Fifo_Priorty_Scheme(this); break;
-		case 1: ps = new Smart_App_Priorty_Scheme(this); break;
-		case 2: ps = new gcRe_gcWr_Er_Re_Wr_Priorty_Scheme(this); break;
-		case 3: ps = new Er_Wr_Re_gcRe_gcWr_Priorty_Scheme(this); break;
-		case 4: ps = new We_Re_gcWr_E_gcR_Priorty_Scheme(this); break;
-		default: ps = new Fifo_Priorty_Scheme(this); break;
+		case 1: ps = new Noop_Priorty_Scheme(this); break;
+		case 2: ps = new Smart_App_Priorty_Scheme(this); break;
+		case 3: ps = new gcRe_gcWr_Er_Re_Wr_Priorty_Scheme(this); break;
+		case 4: ps = new Er_Wr_Re_gcRe_gcWr_Priorty_Scheme(this); break;
+		case 5: ps = new We_Re_gcWr_E_gcR_Priorty_Scheme(this); break;
+		case 6: ps = new Re_Er_Wr_Priorty_Scheme(this); break;
+		case 7: ps = new Semi_Fifo_Priorty_Scheme(this); break;
+		default: ps = new Semi_Fifo_Priorty_Scheme(this); break;
 	}
 	current_events = new Scheduling_Strategy(this, ssd, ps);
 	overdue_events = new Scheduling_Strategy(this, ssd, new Fifo_Priorty_Scheme(this));
@@ -88,6 +91,7 @@ void IOScheduler::schedule_events_queue(deque<Event*> events) {
 	//printf("dependency_code_to_type size: %d\n", dependency_code_to_type.size());
 
 	Event* first = dependencies[operation_code].front();
+	assert(dependencies.size() > 0);
 	dependencies[operation_code].pop_front();
 
 	if (events.back()->is_original_application_io() && first->is_mapping_op() && first->get_event_type() == READ) {
@@ -123,12 +127,18 @@ void IOScheduler::complete(Event* event) {
 }
 
 void IOScheduler::execute_soonest_events() {
+	/*if (StatisticsGatherer::get_global_instance()->total_writes() > 1000001) {
+		if (!current_events->empty()) current_events->print();
+		if (!overdue_events->empty()) overdue_events->print();
+		PRINT_LEVEL = 2;
+	}*/
 	if (current_events->empty() && overdue_events->empty() && !completed_events->empty()) {
 		send_earliest_completed_events_back();
 	}
 	double current_time = get_current_time();
 	double next_events_time = current_time + 1;
 	update_current_events(current_time);
+
 	while (current_time < next_events_time && (!current_events->empty() || !overdue_events->empty())) {
 		if (!completed_events->empty() && current_time >= completed_events->get_earliest_time()) {
 			send_earliest_completed_events_back();
@@ -136,6 +146,8 @@ void IOScheduler::execute_soonest_events() {
 			current_time = get_current_time();
 			continue;
 		}
+		bool emp  = overdue_events->empty();
+		double ear = overdue_events->get_earliest_time();
 		if (!overdue_events->empty() && overdue_events->get_earliest_time() < next_events_time) {
 			overdue_events->schedule();
 		}
@@ -145,6 +157,7 @@ void IOScheduler::execute_soonest_events() {
 		update_current_events(current_time);
 		current_time = get_current_time();
 	}
+
 }
 
 // this is used to signal the SSD object when all events have finished executing
@@ -165,13 +178,13 @@ double IOScheduler::get_soonest_event_time(vector<Event*> const& events) const {
 void IOScheduler::push(Event* event) {
 	event_type t = event->get_event_type();
 	double wait = event->get_bus_wait_time();
-	if (		(t == READ_COMMAND && wait >= READ_DEADLINE)
+	/*if (		(t == READ_COMMAND && wait >= READ_DEADLINE)
 			|| 	(t == READ_TRANSFER && wait >= READ_TRANSFER_DEADLINE)
 			|| 	(t == WRITE && wait >= WRITE_DEADLINE)) {
 		overdue_events->push(event);
 		//event->print();
 	}
-	else
+	else*/
 		current_events->push(event);
 }
 
@@ -216,24 +229,32 @@ void IOScheduler::update_current_events(double current_time) {
 void IOScheduler::handle(vector<Event*>& events) {
 	while (events.size() > 0) {
 		Event* event = events.back();
-		event->increment_iteration_count();
 		events.pop_back();
-		event_type type = event->get_event_type();
-		if (type == WRITE || type == COPY_BACK) {
-			handle_write(event);
+		if (event == NULL) {
+			continue;
 		}
-		else if (type == READ_COMMAND && event->is_flexible_read()) {
-			handle_flexible_read(event);
-		}
-		else if (type == READ_COMMAND || type == COPY_BACK) {
-			handle_read(event);
-		}
-		else if (type == TRIM) {
-			execute_next(event);
-		}
-		else {
-			handle_event(event);
-		}
+		handle(event);
+	}
+}
+
+void IOScheduler::handle(Event* event) {
+
+	event->increment_iteration_count();
+	event_type type = event->get_event_type();
+	if (type == WRITE || type == COPY_BACK) {
+		handle_write(event);
+	}
+	else if (type == READ_COMMAND && event->is_flexible_read()) {
+		handle_flexible_read(event);
+	}
+	else if (type == READ_COMMAND || type == COPY_BACK) {
+		handle_read(event);
+	}
+	else if (type == TRIM) {
+		execute_next(event);
+	}
+	else {
+		handle_event(event);
 	}
 }
 
@@ -255,8 +276,19 @@ void IOScheduler::handle_event(Event* event) {
 }
 
 void IOScheduler::handle_read(Event* event) {
+
+	if (event->get_application_io_id() == 1693276) {
+		int i = 0;
+		i++;
+	}
+
 	double time = bm->in_how_long_can_this_event_be_scheduled(event->get_address(), event->get_current_time());
 	bool can_schedule = bm->can_schedule_on_die(event->get_address(), event->get_event_type(), event->get_application_io_id());
+
+	if (event->get_application_io_id() == 1622620) {
+		int i = 0;
+		i++;
+	}
 
 	if (!can_schedule) {
 		event->incr_bus_wait_time(BUS_DATA_DELAY + BUS_CTRL_DELAY + time);
@@ -274,7 +306,6 @@ void IOScheduler::handle_read(Event* event) {
 		dependencies[event->get_application_io_id()].pop_front();
 		setup_dependent_event(event, transfer);*/
 		long app_code = event->get_application_io_id();
-		//event->print();
 		execute_next(event);
 
 		Event* transfer = current_events->find(app_code);
@@ -283,11 +314,7 @@ void IOScheduler::handle_read(Event* event) {
 			transfer = overdue_events->find(app_code);
 			overdue_events->remove(transfer);
 		}
-		//transfer->print();
 		execute_next(transfer);
-
-		//transfer->print();
-		//execute_next(transfer);
 	}
 }
 
@@ -351,21 +378,14 @@ void IOScheduler::handle_flexible_read(Event* event) {
 
 // Looks for an idle LUN and schedules writes in it. Works in O(events * LUNs), but also handles overdue events. Using this for now for simplicity.
 void IOScheduler::handle_write(Event* event) {
-	Address addr = bm->choose_write_address(*event);
+	Address addr = event->get_address();
 
-	if (event->get_application_io_id() == 41495) {
-		int i = 0;
-		i++;
-		//VisualTracer::print_horizontally(1000);
+	if (event->get_address().valid == NONE) {
+		addr = bm->choose_write_address(*event);
 	}
-
 	try_to_put_in_safe_cache(event);
 	double wait_time = bm->in_how_long_can_this_event_be_scheduled(addr, event->get_current_time(), WRITE);
-	/*if (wait_time > 0) {
-		wait_time = max(1.0, bm->in_how_long_can_this_write_be_scheduled( event->get_current_time() ));
-	}*/
-
-	//assert(wait_time1 == wait_time);
+	//double wait_time = bm->in_how_long_can_this_write_be_scheduled2(event->get_current_time());
 
 	if (addr.valid == NONE && event->get_event_type() == COPY_BACK) {
 		transform_copyback(event);
@@ -377,6 +397,7 @@ void IOScheduler::handle_write(Event* event) {
 	else if (!bm->can_schedule_on_die(addr, event->get_event_type(), event->get_application_io_id())) {
 		event->incr_bus_wait_time(wait_time + BUS_DATA_DELAY + BUS_CTRL_DELAY);
 		push(event);
+		assert(false);
 	}
 	else if (wait_time > 0) {
 		event->incr_bus_wait_time(wait_time);
@@ -384,7 +405,9 @@ void IOScheduler::handle_write(Event* event) {
 	}
 	else {
 		event->set_address(addr);
-		ftl->set_replace_address(*event);
+		//if (event->get_replace_address().valid == NONE) {
+			ftl->set_replace_address(*event);
+		//}
 		assert(addr.page < BLOCK_SIZE);
 		execute_next(event);
 	}
@@ -422,9 +445,6 @@ void IOScheduler::remove_current_operation(Event* event) {
 void IOScheduler::handle_noop_events(vector<Event*>& events) {
 	while (events.size() > 0) {
 		Event* event = events.back();
-		if (event->get_application_io_id() == 10111) {
-			event->print();
-		}
 		events.pop_back();
 
 		uint dependency_code = event->get_application_io_id();
@@ -436,15 +456,37 @@ void IOScheduler::handle_noop_events(vector<Event*>& events) {
 			e->incr_pure_ssd_wait_time(event->get_bus_wait_time() + event->get_execution_time());
 			dependents.pop_front();
 			e->set_noop(true);
+			inform_FTL_of_noop_completion(e);
 			complete(e);
+		}
+		if (event->is_garbage_collection_op() && event->get_event_type() != WRITE) {
+			trigger_next_migration(event);
 		}
 		dependencies.erase(dependency_code);
 		dependency_code_to_LBA.erase(dependency_code);
 		dependency_code_to_type.erase(dependency_code);
+		current_events->register_event_compeltion(event);
+		overdue_events->register_event_compeltion(event);
 		manage_operation_completion(event);
+		inform_FTL_of_noop_completion(event);
 		//ssd->register_event_completion(event);
 		complete(event);
 	}
+}
+
+void IOScheduler::inform_FTL_of_noop_completion(Event* event) {
+	//static int c = 0;
+	//printf("%d\n", c++);
+	if (event->get_event_type() == READ_TRANSFER) {
+		ftl->register_read_completion(*event, SUCCESS);
+		if (event->is_garbage_collection_op()) {
+			trigger_next_migration(event);
+		}
+	}
+	else if (event->get_event_type() == WRITE) {
+		ftl->register_write_completion(*event, SUCCESS);
+	}
+	migrator->get_garbage_collector()->register_event_completion(*event);
 }
 
 void IOScheduler::promote_to_gc(Event* event_to_promote) {
@@ -486,19 +528,76 @@ void IOScheduler::setup_dependent_event(Event* event, Event* dependent) {
 	init_event(dependent);
 }
 
-enum status IOScheduler::execute_next(Event* event) {
 
+enum status IOScheduler::execute_next(Event* event) {
 	enum status result = ssd->issue(event);
 	assert(result == SUCCESS);
 
-	if (PRINT_LEVEL > 0 && event->is_original_application_io()) {
+	if (PRINT_LEVEL > 0  /*&& event->is_original_application_io() */ /*&& (event->get_event_type() == WRITE || event->get_event_type() == ERASE *//*|| event->get_event_type() == READ_TRANSFER)*/   /* && event->is_garbage_collection_op() && (event->get_event_type() == WRITE || event->get_event_type() == ERASE)*/ ) {
 		event->print();
 		if (event->is_flexible_read()) {
 			//printf("FLEX\n");
 		}
 	}
 
+	if (event->get_logical_address() == 17569) {
+		//event->print();
+	}
+	if (event->get_logical_address() == 9181 && event->get_event_type() == WRITE) {
+		//event->print();
+	}
+
+	/*if (event->is_garbage_collection_op() && event->get_event_type() == READ_TRANSFER && event->get_address().package == 2 && event->get_address().die == 1 && event->get_address().block == 991) {
+		printf("%f  ", event->get_current_time());
+		event->print();
+	}*/
+
+
+/*
+	if (event->get_event_type() == WRITE && event->get_replace_address().package == 0 && event->get_replace_address().die == 0 && event->get_replace_address().block == 186) {
+		event->print();
+	}
+
+	if (event->get_application_io_id() == 1063947) {
+		int i = 0;
+		i++;
+	}*/
+
+	/*if (StatisticsGatherer::get_global_instance()->total_writes() == 500000) {
+		VisualTracer::print_horizontally(1000);
+	}
+
+	if (StatisticsGatherer::get_global_instance()->total_writes() == 1000000) {
+		VisualTracer::print_horizontally(1000);
+	}
+
+	if (StatisticsGatherer::get_global_instance()->total_writes() == 1500000) {
+		VisualTracer::print_horizontally(1000);
+	}*/
+
+	/*if (event->get_address().package == 0 && event->get_address().die == 1 && event->get_address().block == 255 && event->get_event_type() == WRITE) {
+		event->print();
+	}
+	if (event->get_replace_address().package == 0 && event->get_replace_address().die == 1 && event->get_replace_address().block == 255 && event->get_event_type() == WRITE) {
+		event->print();
+	}*/
+
+
 	handle_finished_event(event);
+
+	/*if (event->get_id() == 2794555) {
+		VisualTracer::print_horizontally(200);
+		event->print();
+		PRINT_LEVEL = 1;
+		int i = 0;
+		i++;
+	}
+
+	bm->update_next_possible_write_time();
+*/
+	if (event->get_event_type() == READ_TRANSFER && event->is_garbage_collection_op()) {
+		trigger_next_migration(event);
+	}
 
 	int dependency_code = event->get_application_io_id();
 	if (dependencies[dependency_code].size() > 0) {
@@ -514,17 +613,16 @@ enum status IOScheduler::execute_next(Event* event) {
 				printf("Assertion failure LBA_currently_executing.count(lba = %d) = %d, concerning ", lba, LBA_currently_executing.count(lba));
 				event->print();
 			}
-			assert(LBA_currently_executing.count(lba) == 1);
+			//assert(LBA_currently_executing.count(lba) == 1);
 			LBA_currently_executing.erase(lba);
-			assert(LBA_currently_executing.count(lba) == 0);
-			assert(dependency_code_to_LBA.count(dependency_code) == 1);
+			//assert(LBA_currently_executing.count(lba) == 0);
+			//assert(dependency_code_to_LBA.count(dependency_code) == 1);
 		}
 		manage_operation_completion(event);
 	}
 
 	if (safe_cache.exists(event->get_logical_address())) {
 		safe_cache.remove(event->get_logical_address());
-		//printf("removing from cache:  %d\n", event->get_logical_address());
 		delete event;
 	} else {
 		complete(event);
@@ -538,6 +636,7 @@ enum status IOScheduler::execute_next(Event* event) {
 
 //
 void IOScheduler::manage_operation_completion(Event* event) {
+
 	int dependency_code = event->get_application_io_id();
 	dependency_code_to_LBA.erase(dependency_code);
 	dependency_code_to_type.erase(dependency_code);
@@ -562,16 +661,23 @@ void IOScheduler::manage_operation_completion(Event* event) {
 }
 
 void IOScheduler::handle_finished_event(Event *event) {
+	if (event->get_event_type() == WRITE && event->get_application_io_id() == 1125450) {
+		int i = 0;
+		i++;
+	}
 	stats.register_IO_completion(event);
 	VisualTracer::register_completed_event(*event);
 	StatisticsGatherer::get_global_instance()->register_completed_event(*event);
-	migrator->register_event_completion(event);
+
+	current_events->register_event_compeltion(event);
+	overdue_events->register_event_compeltion(event);
 	if (event->get_event_type() == WRITE || event->get_event_type() == COPY_BACK) {
 		ftl->register_write_completion(*event, SUCCESS);
 		bm->register_write_outcome(*event, SUCCESS);
 		//StateTracer::print();
 	} else if (event->get_event_type() == ERASE) {
 		bm->register_erase_outcome(*event, SUCCESS);
+		ftl->register_erase_completion(*event);
 	} else if (event->get_event_type() == READ_COMMAND) {
 		bm->register_read_command_outcome(*event, SUCCESS);
 	} else if (event->get_event_type() == READ_TRANSFER) {
@@ -584,6 +690,7 @@ void IOScheduler::handle_finished_event(Event *event) {
 		printf("LOOK HERE ");
 		event->print();
 	}
+	migrator->register_event_completion(event);
 }
 
 void IOScheduler::init_event(Event* event) {
@@ -618,12 +725,10 @@ void IOScheduler::init_event(Event* event) {
 		ftl->set_read_address(*event);
 	}
 	else if (type == WRITE) {
-		//printf("new event  %d    %f\n", event->get_logical_address(), event->get_bus_wait_time());
 		bm->register_write_arrival(*event);
 		try_to_put_in_safe_cache(event);
-//		ftl->set_replace_address(*event);
 	}
-	else if (type == TRIM) {
+	else if (type == TRIM && event->get_replace_address().valid == NONE) {
 		ftl->set_replace_address(*event);
 	}
 	else if (type == GARBAGE_COLLECTION) {
@@ -648,6 +753,43 @@ void IOScheduler::init_event(Event* event) {
 	else if (type == ERASE) {
 		push(event);
 	}
+	else if (type == MESSAGE) {
+		bm->receive_message(*event);
+		completed_events->push(event);
+	}
+}
+
+
+void IOScheduler::trigger_next_migration(Event* event) {
+	if (!migrator->more_migrations(event)) {
+		return;
+	}
+	deque<Event*> migration = migrator->trigger_next_migration(event);
+	Event* first = migration.front();
+	migration.pop_front();
+	Event* second = migration.front();
+	dependencies[first->get_application_io_id()] = migration;
+	dependency_code_to_LBA[first->get_application_io_id()] = first->get_logical_address();
+	dependency_code_to_type[first->get_application_io_id()] = second->get_event_type(); // = WRITE for normal GC, COPY_BACK for copy backs
+	init_event(first);
+	//first->incr_bus_wait_time(first->get_current_time() - event->get_current_time());
+	if (event->get_address().get_block_id() != first->get_address().get_block_id()) {
+		if (LBA_currently_executing.at(first->get_logical_address()) == first->get_application_io_id()) {
+			LBA_currently_executing.erase(first->get_logical_address());
+			bm->register_trim_making_gc_redundant(first);
+		}
+		else if (!first->get_noop()) {
+			bm->register_trim_making_gc_redundant(first);
+		}
+		/*else {
+			bm->register_trim_making_gc_redundant(first);
+			printf("------------> \t\t\n");
+			first->print();
+		}*/
+
+		first->set_noop(true);
+		first->set_address(event->get_address());
+	}
 }
 
 void IOScheduler::try_to_put_in_safe_cache(Event* write) {
@@ -663,6 +805,8 @@ void IOScheduler::try_to_put_in_safe_cache(Event* write) {
 
 
 void IOScheduler::remove_redundant_events(Event* new_event) {
+
+
 	uint la = new_event->get_logical_address();
 	if (LBA_currently_executing.count(la) == 0) {
 		LBA_currently_executing[new_event->get_logical_address()] = new_event->get_application_io_id();
@@ -680,18 +824,14 @@ void IOScheduler::remove_redundant_events(Event* new_event) {
 	if (existing_event == NULL) {
 		existing_event = overdue_events->find(dependency_code_of_other_event);
 	}
-
-	if (new_event->get_application_io_id() == 2458) {
-		int i = 0;
-		i++;
-	}
-
 	//bool both_events_are_gc = new_event->is_garbage_collection_op() && existing_event->is_garbage_collection_op();
 	//assert(!both_events_are_gc);
 
 	event_type new_op_code = dependency_code_to_type[dependency_code_of_new_event];
 	event_type scheduled_op_code = dependency_code_to_type[dependency_code_of_other_event];
 
+	assert(new_op_code != TRIM);
+	assert(scheduled_op_code != TRIM);
 	//if (existing_event == NULL) {
 		//new_event->print();
 	//}
@@ -710,15 +850,22 @@ void IOScheduler::remove_redundant_events(Event* new_event) {
 		remove_event_from_current_events(existing_event); // Remove old event from current_events; it's added again when independent event (the copy back) finishes
 	}
 	else */
-	if (new_event->get_application_io_id() == 10111) {
-		new_event->print();
+	if (new_event->get_logical_address() == 37796 || existing_event->get_logical_address() == 37796) {
+		int i = 0;
+		i++;
 	}
 
-	if (new_event->is_garbage_collection_op() && scheduled_op_code == WRITE) {
+	if (IS_FTL_PAGE_MAPPING && new_event->is_garbage_collection_op() && scheduled_op_code == WRITE) {
 		promote_to_gc(existing_event);
 		remove_current_operation(new_event);
 		push(new_event); // Make sure the old GC READ is run, even though it is now a NOOP command
 		LBA_currently_executing[common_logical_address] = dependency_code_of_other_event;
+		if (existing_event->is_garbage_collection_op() && !existing_event->is_original_application_io() && !existing_event->is_mapping_op()) {
+			bm->register_trim_making_gc_redundant(new_event);
+		}
+	}
+	else if (!IS_FTL_PAGE_MAPPING && new_event->is_garbage_collection_op() && scheduled_op_code == WRITE) {
+		make_dependent(new_event, dependency_code_of_other_event);
 	}
 	else if (new_event->is_garbage_collection_op() && scheduled_op_code == TRIM) {
 		remove_current_operation(new_event);
@@ -731,43 +878,48 @@ void IOScheduler::remove_redundant_events(Event* new_event) {
 			bm->register_trim_making_gc_redundant(new_event);
 		}
 
-		promote_to_gc(new_event);
-		remove_current_operation(existing_event);
-		LBA_currently_executing[common_logical_address] = dependency_code_of_new_event;
+		//promote_to_gc(new_event);
+		//remove_current_operation(existing_event);
+		make_dependent(new_event, dependency_code_of_other_event);
+		//if (existing_event->get_event_type() == WRITE) {
+		//	new_event->set_address(existing_event->get_address());
+		//	new_event->set_replace_address(existing_event->get_replace_address());
+		//}
+		//LBA_currently_executing[common_logical_address] = dependency_code_of_new_event;
 	}
 
 	// if two writes are scheduled, the one before is irrelevant and may as well be cancelled
-	else if (new_op_code == WRITE && scheduled_op_code == WRITE) {
+	else if (new_op_code == WRITE && scheduled_op_code == WRITE) {	// 1
 		remove_current_operation(existing_event);
 		LBA_currently_executing[common_logical_address] = dependency_code_of_new_event;
 		//make_dependent(new_event, dependency_code_of_other_event);
 	}
-	else if (new_op_code == WRITE && scheduled_op_code == READ && existing_event->is_mapping_op()) {
+	else if (new_op_code == WRITE && scheduled_op_code == READ && existing_event->is_mapping_op()) { // 2
 		remove_current_operation(existing_event);
 		LBA_currently_executing[common_logical_address] = dependency_code_of_new_event;
 		//make_dependent(new_event, dependency_code_of_new_event, dependency_code_of_other_event);
 	}
-	else if (new_op_code == COPY_BACK && scheduled_op_code == READ && existing_event != NULL) {
+	else if (new_op_code == COPY_BACK && scheduled_op_code == READ && existing_event != NULL) { // 3
 		remove_current_operation(existing_event);
 		LBA_currently_executing[common_logical_address] = dependency_code_of_new_event;
 	}
 	// if there is a write, but before a read was scheduled, we should read first before making the write
-	else if (new_op_code == WRITE && (scheduled_op_code == READ || scheduled_op_code == READ_COMMAND || scheduled_op_code == READ_TRANSFER)) {
+	else if (new_op_code == WRITE && (scheduled_op_code == READ || scheduled_op_code == READ_COMMAND || scheduled_op_code == READ_TRANSFER)) { // 4
 		//assert(false);
 		make_dependent(new_event, dependency_code_of_other_event);
 	}
 	// if there is a read, and a write is scheduled, then the contents of the write must be buffered, so the read can wait
-	else if (new_op_code == READ && existing_event != NULL && existing_event->is_garbage_collection_op()) {
+	else if (new_op_code == READ && existing_event != NULL && existing_event->is_garbage_collection_op()) {  // 5
 		new_event->set_noop(true);
 		make_dependent(new_event, dependency_code_of_other_event);
 	}
-	else if (new_op_code == READ && (scheduled_op_code == WRITE || scheduled_op_code == COPY_BACK )) {
+	else if (new_op_code == READ && (scheduled_op_code == WRITE || scheduled_op_code == COPY_BACK )) { // 6
 		//remove_current_operation(new_event);
 		//current_events->push_back(new_event);
 		make_dependent(new_event, dependency_code_of_other_event);
 	}
 	// if there are two reads to the same address, there is no point reading the same page twice.
-	else if ((new_op_code == READ || new_op_code == READ_COMMAND || new_op_code == READ_TRANSFER) && (scheduled_op_code == READ || scheduled_op_code == READ_COMMAND || scheduled_op_code == READ_TRANSFER)) {
+	else if ((new_op_code == READ || new_op_code == READ_COMMAND || new_op_code == READ_TRANSFER) && (scheduled_op_code == READ || scheduled_op_code == READ_COMMAND || scheduled_op_code == READ_TRANSFER)) { // 7
 		//assert(false);
 		make_dependent(new_event, dependency_code_of_other_event);
 		if (!new_event->is_garbage_collection_op()) {
@@ -776,7 +928,7 @@ void IOScheduler::remove_redundant_events(Event* new_event) {
 		}
 	}
 	// if a write is scheduled when a trim is received, we may as well cancel the write
-	else if (new_op_code == TRIM && scheduled_op_code == WRITE) {
+	else if (new_op_code == TRIM && scheduled_op_code == WRITE) {  // 8
 		remove_current_operation(existing_event);
 		if (existing_event->is_garbage_collection_op()) {
 			bm->register_trim_making_gc_redundant(new_event);
@@ -784,16 +936,16 @@ void IOScheduler::remove_redundant_events(Event* new_event) {
 		LBA_currently_executing[common_logical_address] = dependency_code_of_new_event;
 	}
 	// if a trim is scheduled, and a write arrives, may as well let the trim execute first
-	else if (new_op_code == WRITE && scheduled_op_code == TRIM) {
+	else if (new_op_code == WRITE && scheduled_op_code == TRIM) {  // 9
 		make_dependent(new_event, dependency_code_of_other_event);
 	}
 	// if a read is scheduled when a trim is received, we must still execute the read. Then we can trim
-	else if (new_op_code == TRIM && (scheduled_op_code == READ || scheduled_op_code == READ_TRANSFER || scheduled_op_code == READ_COMMAND)) {
+	else if (new_op_code == TRIM && (scheduled_op_code == READ || scheduled_op_code == READ_TRANSFER || scheduled_op_code == READ_COMMAND)) {  // 10
 		make_dependent(new_event, dependency_code_of_other_event);
 		//make_dependent(new_event, dependency_code_of_new_event, dependency_code_of_other_event);
 	}
 	// if something is to be trimmed, and a read is sent, invalidate the read
-	else if ((new_op_code == READ || new_op_code == READ_TRANSFER || new_op_code == READ_COMMAND) && scheduled_op_code == TRIM) {
+	else if ((new_op_code == READ || new_op_code == READ_TRANSFER || new_op_code == READ_COMMAND) && scheduled_op_code == TRIM) { // 1
 		if (new_event->is_garbage_collection_op()) {
 			bm->register_trim_making_gc_redundant(new_event);
 			remove_current_operation(new_event);

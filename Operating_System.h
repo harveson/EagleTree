@@ -27,9 +27,9 @@ public:
 	Event* pop();
 
 	bool is_finished() const;
-	int get_num_ongoing_IOs() { return num_IOs_executing; }
+	int get_num_ongoing_IOs() const { return num_IOs_executing; }
 	void stop();
-	bool is_stopped();
+	bool is_stopped() const;
 
 	inline void set_time(double current_time) { time = current_time; }
 	inline double get_time() { return time; }
@@ -79,6 +79,7 @@ public:
     template<class Archive> void serialize(Archive & ar, const unsigned int version) {}
 };
 
+// Generates writes
 class WRITES : public IO_Mode_Generator {
 public:
 	~WRITES() {};
@@ -89,6 +90,7 @@ public:
     }
 };
 
+// Generates trims
 class TRIMS : public IO_Mode_Generator {
 public:
 	~TRIMS() {};
@@ -99,6 +101,7 @@ public:
     }
 };
 
+// Generates reads
 class READS : public IO_Mode_Generator {
 public:
 	~READS() {};
@@ -109,6 +112,7 @@ public:
     }
 };
 
+// Generates reads or writes with a certain probability
 class READS_OR_WRITES : public IO_Mode_Generator {
 public:
 	READS_OR_WRITES() : random_number_generator(4624626), write_probability(0.5) {}
@@ -147,6 +151,7 @@ public:
     }
 };
 
+// Creates a uniformly randomly distributed IO pattern acress the target logical address space
 class Random_IO_Pattern : public IO_Pattern
 {
 public:
@@ -164,6 +169,28 @@ private:
 	MTRand_int32 random_number_generator;
 };
 
+// Creates a uniformly randomly distributed IO pattern acress the target logical address space
+class Random_IO_Pattern_Collision_Free : public IO_Pattern
+{
+public:
+	Random_IO_Pattern_Collision_Free() : IO_Pattern(), random_number_generator(23623620), counter(0) {}
+	Random_IO_Pattern_Collision_Free(long min_LBA, long max_LBA, ulong seed);
+	~Random_IO_Pattern_Collision_Free() {};
+	void reinit();
+	int next();
+    friend class boost::serialization::access;
+    template<class Archive>
+    void serialize(Archive & ar, const unsigned int version) {
+    	ar & boost::serialization::base_object<IO_Pattern>(*this);
+    	ar & random_number_generator;
+    }
+private:
+	MTRand_int32 random_number_generator;
+	vector<int> candidates;
+	int counter;
+};
+
+// Creates a uniformly randomly distributed IO pattern acress the target logical address space
 class Sequential_IO_Pattern : public IO_Pattern
 {
 public:
@@ -181,19 +208,46 @@ private:
 	long counter;
 };
 
+class File_Reading_Thread : public Thread {
+public:
+	File_Reading_Thread();
+	~File_Reading_Thread();
+	void issue_first_IOs();
+	void read_and_submit();
+	int get_next();
+	void get_back_to_start_after_init();
+	void handle_event_completion(Event* event);
+	void print_trace_stats();
+	void calc_update_distances();
+	void sequentiality_analyze();
+	void process_trace();
+private:
+	string file_name;
+	ifstream file;
+	set<long> unique_addresses, initial_addresses;
+	vector<int> logical_address_space_size_over_time;  // index is size. value is io num
+	long io_num;
+	bool collect_stats;
+	vector<int> address_map;
+	vector<int> update_frequency_count;
+	vector<int> trace;
+	int highest_address;
+};
+
 /*
  * Class Heirarchy for creating synthetic IO patterns with many configurable properties.
  */
 class Simple_Thread : public Thread
 {
 public:
-	Simple_Thread() : io_gen(NULL), io_type_gen(NULL), number_of_times_to_repeat(0), MAX_IOS(0) {}
+	Simple_Thread() : io_gen(NULL), io_type_gen(NULL), number_of_times_to_repeat(0), MAX_IOS(0), io_size(1) {}
 	Simple_Thread(IO_Pattern* generator, int MAX_IOS, IO_Mode_Generator* type);
 	Simple_Thread(IO_Pattern* generator, IO_Mode_Generator* type, int MAX_IOS, long num_IOs);
 	virtual ~Simple_Thread();
 	void generate_io();
 	void issue_first_IOs();
 	void handle_event_completion(Event* event);
+	void set_io_size(int size) { io_size = size; }
 	inline void set_num_ios(ulong num_ios) { number_of_times_to_repeat = num_ios; }
     friend class boost::serialization::access;
     template<class Archive>
@@ -203,21 +257,42 @@ public:
     	ar & MAX_IOS;
     	ar & io_gen;
     	ar & io_type_gen;
+    	ar & io_size;
     }
 private:
 	long number_of_times_to_repeat;
 	int MAX_IOS;
 	IO_Pattern* io_gen;
 	IO_Mode_Generator* io_type_gen;
+	int io_size; // in pages
 };
 
+
+
+// This thread performs synchronous random writes across the target address space
 class Synchronous_Random_Writer : public Simple_Thread
 {
 public:
+	Synchronous_Random_Writer() : Simple_Thread() {}
 	Synchronous_Random_Writer(long min_LBA, long max_LBA, ulong randseed)
 		: Simple_Thread(new Random_IO_Pattern(min_LBA, max_LBA, randseed), new WRITES(), 1, INFINITE) {}
+    friend class boost::serialization::access;
+    template<class Archive> void serialize(Archive & ar, const unsigned int version) {
+    	ar & boost::serialization::base_object<Simple_Thread>(*this);
+    }
 };
 
+
+// This thread performs synchronous random writes across the target address space
+class Synchronous_No_Collision_Random_Writer : public Simple_Thread
+{
+public:
+	Synchronous_No_Collision_Random_Writer() : Simple_Thread() {}
+	Synchronous_No_Collision_Random_Writer(long min_LBA, long max_LBA, ulong randseed)
+		: Simple_Thread(new Random_IO_Pattern_Collision_Free(min_LBA, max_LBA, randseed), new WRITES(), 1, INFINITE) {}
+};
+
+// This thread performs synchronous random reads across the target address space
 class Synchronous_Random_Reader : public Simple_Thread
 {
 public:
@@ -225,6 +300,7 @@ public:
 		: Simple_Thread(new Random_IO_Pattern(min_LBA, max_LBA, randseed), new READS(), 1, INFINITE) {}
 };
 
+// This thread performs asynchronous random writes across the target address space
 class Asynchronous_Random_Writer : public Simple_Thread
 {
 public:
@@ -237,6 +313,7 @@ public:
     }
 };
 
+// This thread performs asynchronous random reads across the target address space
 class Asynchronous_Random_Reader : public Simple_Thread
 {
 public:
@@ -249,6 +326,7 @@ public:
     }
 };
 
+// This thread performs synchronous sequential writes across the target address space
 class Synchronous_Sequential_Writer : public Simple_Thread
 {
 public:
@@ -256,9 +334,11 @@ public:
 		: Simple_Thread(new Sequential_IO_Pattern(min_LBA, max_LBA), 1, new WRITES()) {}
 };
 
+// This thread performs asynchronous sequential writes across the target address space
 class Asynchronous_Sequential_Writer : public Simple_Thread
 {
 public:
+	Asynchronous_Sequential_Writer() : Simple_Thread() {}
 	Asynchronous_Sequential_Writer(long min_LBA, long max_LBA)
 		: Simple_Thread(new Sequential_IO_Pattern(min_LBA, max_LBA), MAX_SSD_QUEUE_SIZE * 2, new WRITES()) {
 	}
@@ -268,6 +348,7 @@ public:
     }
 };
 
+// This thread trims the target address space
 class Asynchronous_Sequential_Trimmer : public Simple_Thread
 {
 public:
@@ -276,6 +357,7 @@ public:
 	}
 };
 
+// This thread synchronously and sequentially reads the target address space
 class Synchronous_Sequential_Reader : public Simple_Thread
 {
 public:
@@ -283,6 +365,7 @@ public:
 		: Simple_Thread(new Sequential_IO_Pattern(min_LBA, max_LBA), 1, new READS()) {}
 };
 
+// This thread asynchronously and sequentially reads the target address space
 class Asynchronous_Sequential_Reader : public Simple_Thread
 {
 public:
@@ -290,6 +373,7 @@ public:
 		: Simple_Thread(new Sequential_IO_Pattern(min_LBA, max_LBA), MAX_SSD_QUEUE_SIZE * 2, new READS()) {}
 };
 
+// This thread performs random reads and writes
 class Asynchronous_Random_Reader_Writer : public Simple_Thread
 {
 public:
@@ -301,22 +385,8 @@ public:
     }
 };
 
-/*class Collision_Free_Asynchronous_Random_Thread : public Thread
-{
-public:
-	Collision_Free_Asynchronous_Random_Thread(long min_LBA, long max_LAB, int number_of_times_to_repeat, ulong randseed = 0, event_type type = WRITE);
-	void issue_first_IOs();
-	void handle_event_completion(Event* event);
-private:
-	long min_LBA, max_LBA;
-	int number_of_times_to_repeat;
-	MTRand_int32 random_number_generator;
-	event_type type;
-	set<long> logical_addresses_submitted;
-};*/
 
-// assuming the relation is made of contigouse pages
-// RAM_available is the number of pages that fit into RAM
+// This thread simulates the IO pattern of an external sort algorithm
 class External_Sort : public Thread
 {
 public:
@@ -335,7 +405,7 @@ private:
 	bool can_start_next_read;
 };
 
-// Simulates the IO pattern of a grace hash join between two relations
+// A thread that simulates the IO pattern of a grace hash join between two relations
 class Grace_Hash_Join : public Thread
 {
 public:
@@ -449,11 +519,11 @@ private:
 		int id;
 		uint num_pages_written;
 		deque<Address_Range > ranges_comprising_file;
-
+		set<pair<int, int>> on_how_many_luns_is_this_file;
 		File(uint size, double death_probability, double time_created, int id);
 
 		bool is_finished() const;
-		void register_write_completion();
+		void register_write_completion(Event* event);
 		void finish(double time_finished);
 	    friend class boost::serialization::access;
 	    template<class Archive> void
@@ -488,23 +558,12 @@ private:
 	int num_files_to_write;
 	int file_id_generator;
 
-	//Reliable_Random_Int_Generator random_number_generator;
-	//Reliable_Random_Double_Generator double_generator;
-
 	MTRand_int32 random_number_generator;
 	MTRand_open double_generator;
 	long max_file_size;
 	int num_pending_trims;
 	phase phase;
-	//Throughput_Moderator throughout_moderator;
 };
-
-/*struct os_event {
-	int thread_id;
-	Event* pending_event;
-	os_event(int thread_id, Event* event) : thread_id(thread_id), pending_event(event) {}
-	os_event() : thread_id(UNDEFINED), pending_event(NULL) {}
-};*/
 
 class Flexible_Reader {
 public:
@@ -570,21 +629,24 @@ private:
 	Flexible_Reader* flex_reader;
 };
 
+// This class can be extended to allow customized IO scheduling policies
 class OS_Scheduler {
 public:
 	virtual ~OS_Scheduler() {}
-	virtual int pick(map<int, Thread*> const& threads) = 0;
+	virtual int pick(unordered_map<int, Thread*> const& threads) = 0;
 };
 
+// This is a FIFO scheduler that implements a simple IO queue.
 class FIFO_OS_Scheduler : public OS_Scheduler {
 public:
-	int pick(map<int, Thread*> const& threads);
+	int pick(unordered_map<int, Thread*> const& threads);
 };
 
+// This is a fair IO scheduler that tries to schedule IOs from different threads in round robin
 class FAIR_OS_Scheduler : public OS_Scheduler {
 public:
 	FAIR_OS_Scheduler() : last_id(0) {}
-	int pick(map<int, Thread*> const& threads);
+	int pick(unordered_map<int, Thread*> const& threads);
 private:
 	int last_id;
 };
@@ -598,6 +660,8 @@ public:
 	void init_threads();
 	~OperatingSystem();
 	void run();
+	void check_if_stuck(bool no_pending_event, bool queue_is_full);
+	void print_progess();
 	void register_event_completion(Event* event);
 	void set_num_writes_to_stop_after(long num_writes);
 	void set_progress_meter_granularity(int num) { progress_meter_granularity = num; }
@@ -615,9 +679,9 @@ private:
 	double get_event_minimal_completion_time(Event const*const event) const;
 	void setup_follow_up_threads(int thread_id, double time);
 	Ssd * ssd;
-	map<int, Thread*> threads;
+	unordered_map<int, Thread*> threads;
 	vector<Thread*> historical_threads;
-	map<long, long> app_id_to_thread_id_mapping;
+	unordered_map<long, long> app_id_to_thread_id_mapping;
 	set<uint> currently_executing_ios;
 	long NUM_WRITES_TO_STOP_AFTER;
 	long num_writes_completed;
@@ -630,6 +694,5 @@ private:
 };
 
 }
-
 
 #endif /* OPERATING_SYSTEM_H_ */
