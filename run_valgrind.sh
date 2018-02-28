@@ -1,2 +1,2 @@
 #!/bin/bash
-valgrind ./Page/FTL > valgrind.txt 2> valgrind.txt
+valgrind --leak-check=yes ./Experiments/demo > valgrind.txt 2> valgrind.txt

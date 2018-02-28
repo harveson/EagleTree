@@ -34,6 +34,8 @@
 
 #include <boost/serialization/export.hpp>
 
+typedef unsigned long ulong;
+
 
 
 /*#include <boost/multi_index_container.hpp>

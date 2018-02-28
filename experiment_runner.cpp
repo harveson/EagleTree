@@ -22,7 +22,8 @@ const double Experiment::K = 1000.0;    // One thousand
 
 double Experiment::calibration_precision      = 1.0; // microseconds
 double Experiment::calibration_starting_point = 15.00; // microseconds
-string Experiment::base_folder = get_current_dir_name();
+char buf[100];
+string Experiment::base_folder = getwd(buf);
 
 Experiment::Experiment()
 	: d_variable(NULL), d_min(0), d_max(0), d_incr(0),
@@ -529,8 +530,10 @@ OperatingSystem* Experiment::load_state(string name) {
 }
 
 void Experiment::create_base_folder(string name) {
-	string exp_folder = get_current_dir_name() + name;
-	printf("creating exp folder:  %s\n", get_current_dir_name());
+	char  buf[100];
+	string cur_folder(getwd(buf));
+	string exp_folder = cur_folder + name;
+	printf("creating exp folder:  %s\n", getwd(buf));
 	base_folder = exp_folder;
 	mkdir(base_folder.c_str(), 0755);
 }

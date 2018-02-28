@@ -412,9 +412,9 @@ void DFTL::print() const {
 
 	// cluster by mapping page
 	map<int, int> bins;
-	for (auto i : cache->cached_mapping_table) {
+	for (auto it = std::begin(cache->cached_mapping_table); it != std::end(cache->cached_mapping_table); ) {
 		//long translation_page_id = la / ENTRIES_PER_TRANSLATION_PAGE;
-		bins[i.first / ENTRIES_PER_TRANSLATION_PAGE]++;
+		bins[it->first / ENTRIES_PER_TRANSLATION_PAGE]++;
 	}
 
 	printf("histogram1:");
