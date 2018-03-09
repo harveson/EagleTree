@@ -993,6 +993,46 @@ private:
 	dftl_statistics dftl_stats;
 };
 
+class PDFTL : public flash_resident_page_ftl {
+public:
+	PDFTL(Ssd *ssd, Block_manager_parent* bm);
+	PDFTL();
+	~PDFTL();
+	void read(Event *event);
+	void write(Event *event);
+	void trim(Event *event);
+	void register_write_completion(Event const& event, enum status result);
+	void register_read_completion(Event const& event, enum status result);
+	void register_trim_completion(Event & event);
+	long get_logical_address(uint physical_address) const;
+	Address get_physical_address(uint logical_address) const;
+	void set_replace_address(Event& event) const;
+	void set_read_address(Event& event) const;
+	void print() const;
+	void print_short() const;
+	static int ENTRIES_PER_TRANSLATION_PAGE;
+	static bool SEPERATE_MAPPING_PAGES;
+
+private:
+	void notify_garbage_collector(int translation_page_id, double time);
+	//bool flush_mapping(double time, bool allow_flushing_dirty);
+	//void iterate(long& victim_key, ftl_cache::entry& victim_entry, bool allow_choosing_dirty);
+	void create_mapping_read(long translation_page_id, double time, Event* dependant);
+	void mark_clean(long translation_page_id, Event const& event);
+	void try_clear_space_in_mapping_cache(double time);
+	set<long> ongoing_mapping_operations; // contains the logical addresses of ongoing mapping IOs
+	unordered_map<long, vector<Event*> > application_ios_waiting_for_translation; // maps translation page ids to application IOs awaiting translation
+	struct mapping_page {
+		map<int, Address> entries;
+	};
+	vector<mapping_page> mapping_pages;
+	struct pdftl_statistics {
+		map<int, int> cleans_histogram;
+		map<int, int> address_hits;
+	};
+	pdftl_statistics pdftl_stats;
+};
+
 
 class FAST : public FtlParent {
 public:
