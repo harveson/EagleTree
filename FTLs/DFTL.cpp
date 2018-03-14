@@ -90,7 +90,7 @@ void DFTL::register_read_completion(Event const& event, enum status result) {
 	application_ios_waiting_for_translation.erase(translation_page_id);
 	for (auto e : waiting_events) {
 		if (e->is_mapping_op()) {
-			assert(e->get_event_type() == WRITE);
+			assert(e->get_event_type() == WRITE); // @suppress("Method cannot be resolved")
 			ongoing_mapping_operations.insert(e->get_logical_address());
 		}
 		else  {

@@ -159,9 +159,9 @@ void PDFTL::register_write_completion(Event const& event, enum status result) {
 		int i = 0;
 		i++;
 	}
-	if (event.is_original_application_io() && gc != NULL && cache->contains(event.get_logical_address())) {
+	if (event.is_original_application_io() && gc != NULL && cache->contains(event.get_logical_address())) { // write page is in the cache
 		Address pa = page_mapping->get_physical_address(event.get_logical_address());
-		gc->invalid_address_notification(pa, event.get_current_time());
+		gc->invalid_address_notification(pa, event.get_current_time()); //invalidate the old page
 	}
 	if (event.is_original_application_io()) {
 		cache->register_write_arrival(event);	// caution. Moved this here from the write method. may lead to other problems.
@@ -173,17 +173,18 @@ void PDFTL::register_write_completion(Event const& event, enum status result) {
 	if (event.get_noop()) {
 		return;
 	}
-	if (!event.is_mapping_op()) {
+	if (!event.is_mapping_op()) { // not mapping op, but data access
 		cache->register_write_completion(event);
 		try_clear_space_in_mapping_cache(event.get_current_time());
 		return;
 	}
+	//is mapping op
 
-	if (ongoing_mapping_operations.count(event.get_logical_address()) == 0) {
+	if (ongoing_mapping_operations.count(event.get_logical_address()) == 0) { //if no ongoing mapping op
 		return;
 	}
-	ongoing_mapping_operations.erase(event.get_logical_address());
-	long translation_page_id = - (event.get_logical_address() - NUMBER_OF_ADDRESSABLE_PAGES());
+	ongoing_mapping_operations.erase(event.get_logical_address()); // erase ongoing mapping op for current page
+	long translation_page_id = - (event.get_logical_address() - NUMBER_OF_ADDRESSABLE_PAGES()); // get translation page id
 
 	// mark all pages included as clean
 	mark_clean(translation_page_id, event);
